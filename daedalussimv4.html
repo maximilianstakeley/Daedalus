@@ -1,0 +1,480 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reality Sim, Phase 4</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#04060c;color:#d4e8e0;font:12px/1.4 Consolas,"SF Mono",monospace}
+#gl{position:fixed;inset:0;width:100%;height:100%}
+.p{position:fixed;background:#08121ccc;border:1px solid #2b4d52;border-radius:4px;padding:8px}
+#hud{top:8px;left:8px;width:270px}#scope{bottom:8px;left:8px;width:300px;height:220px}
+#prompt{bottom:8px;left:50%;transform:translateX(-50%);display:flex;gap:6px;margin:0}
+button,input{background:#0e2630;color:#d4e8e0;border:1px solid #2b4d52;border-radius:3px;padding:5px 8px;font:inherit}
+button:hover{background:#1a4450}input{width:340px}pre{margin:6px 0 0;white-space:pre-wrap}
+</style>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","@mediapipe/tasks-vision":"https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/","rapier":"https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.12.0/rapier.es.js","transformers":"https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.0","splats":"https://cdn.jsdelivr.net/npm/@mkkellogg/gaussian-splats-3d@0.4.6/build/gaussian-splats-3d.module.js"}}</script>
+</head><body>
+<canvas id="gl"></canvas><video id="cam" playsinline muted style="display:none"></video>
+<div class="p" id="hud"><b>Reality Sim, phase 4</b><br>
+<button id="go">Start camera + mic</button>
+<button id="hr">Heart rate (BLE)</button><button id="ser">Serial</button><button id="ws">WebSocket</button>
+<pre id="st">Press Start. Click the scene to capture the mouse. WASD move, Shift boost, Space/C up/down, M sound, I invert mask, V view, N simulated signals, pinch to grab orbs, G geology here, T next star target, wheel = speed, [ ] star gain, R scan room, O load splat, K street/region scale, U geology map, J join social.</pre><pre id="fps"></pre><pre id="geo"></pre><div id="wx"></div><input type="file" id="fsp" accept=".ply,.splat,.ksplat" style="display:none"><img id="sv" style="display:none;position:fixed;right:8px;top:8px;width:320px;border:1px solid #2b4d52;border-radius:4px"></div>
+<canvas class="p" id="scope" width="300" height="220"></canvas>
+<form class="p" id="prompt"><input id="txt" placeholder="Describe a world: space, forest, desert, ocean, snow, mars"><input id="mdl" value="llama3.2" title="Ollama model name" style="width:80px"><button>Generate</button></form>
+<script type="module">
+import * as THREE from 'three';
+import {FilesetResolver,ImageSegmenter,PoseLandmarker,HandLandmarker} from '@mediapipe/tasks-vision';
+const $=id=>document.getElementById(id),cv=$('gl'),cam=$('cam'),log=m=>$('st').textContent=m;
+
+/* ---------- signal bus: every sensor calls sig(name,value) ---------- */
+const S={};
+const sig=(n,v)=>{const s=S[n]||(S[n]={v,h:new Array(150).fill(v)});s.v=v;s.h.push(v);s.h.shift()};
+const sx=$('scope').getContext('2d');
+function drawScope(){sx.clearRect(0,0,300,220);sx.font='10px Consolas,monospace';let y=0;
+ for(const[n,s]of Object.entries(S).slice(0,12)){const lo=Math.min(...s.h),r=(Math.max(...s.h)-lo)||1;
+  sx.strokeStyle='#5fe0c0';sx.beginPath();
+  s.h.forEach((v,i)=>{const px=110+i*1.26,py=y+16-(v-lo)/r*14;i?sx.lineTo(px,py):sx.moveTo(px,py)});sx.stroke();
+  sx.fillStyle='#9fc4bc';sx.fillText(n+' '+s.v.toFixed(2),4,y+12);y+=18}}
+
+/* ---------- procedural terrain ---------- */
+const ih=(x,y)=>{let h=(Math.imul(x,374761393)+Math.imul(y,668265263))|0;h=Math.imul(h^(h>>>13),1274126177);return((h^(h>>>16))>>>0)/4294967295};
+const vn=(x,y)=>{const xi=Math.floor(x),yi=Math.floor(y),xf=x-xi,yf=y-yi,u=xf*xf*(3-2*xf),v=yf*yf*(3-2*yf);
+ return ih(xi,yi)*(1-u)*(1-v)+ih(xi+1,yi)*u*(1-v)+ih(xi,yi+1)*(1-u)*v+ih(xi+1,yi+1)*u*v};
+const PRE={
+ earth:{amp:40,sky:0x7aa7d8,fog:.006,lo:[.18,.45,.18],hi:[.85,.85,.8],stars:0},
+ forest:{amp:28,sky:0x4a6a58,fog:.012,lo:[.04,.28,.08],hi:[.3,.5,.2],stars:0},
+ desert:{amp:34,sky:0xe8c490,fog:.005,lo:[.75,.55,.28],hi:[.95,.8,.5],stars:0},
+ ocean:{amp:10,sky:0x6ab0d8,fog:.008,lo:[.04,.18,.45],hi:[.3,.7,.8],stars:0},
+ snow:{amp:65,sky:0xaec4d8,fog:.01,lo:[.6,.68,.78],hi:[1,1,1],stars:0},
+ mars:{amp:45,sky:0xc27a55,fog:.007,lo:[.45,.18,.1],hi:[.8,.45,.3],stars:.3},
+ space:{amp:6,sky:0x010208,fog:.0006,lo:[.08,.08,.3],hi:[.6,.3,.8],stars:1}};
+const SYN={galaxy:'space',star:'space',stars:'space',satellite:'space',orbit:'space',jungle:'forest',trees:'forest',
+ sand:'desert',dune:'desert',dunes:'desert',sea:'ocean',water:'ocean',ice:'snow',mountain:'snow',mountains:'snow',red:'mars'};
+let P=PRE.earth,SX=0,SZ=0,biome='earth';
+/* CPU height must match the GPU shader exactly: integer hash, same octaves and offset */
+let REAL=null;const Hp=(x,z)=>{x=(x+SX)*.008;z=(z+SZ)*.008;let a=1,s=0;for(let o=0;o<5;o++){s+=a*vn(x,z);a*=.5;x*=2.1;z*=2.1}return(s-.97)*P.amp*2};
+const Hr=(x,z)=>{const t=x/REAL.ps+REAL.cx-.5,u=z/REAL.ps+REAL.cy-.5,i=Math.floor(t),j=Math.floor(u),f=t-i,g=u-j,
+ q=(a,b)=>REAL.a[Math.min(REAL.h-1,Math.max(0,b))*REAL.w+Math.min(REAL.w-1,Math.max(0,a))];
+ return((q(i,j)*(1-f)+q(i+1,j)*f)*(1-g)+(q(i,j+1)*(1-f)+q(i+1,j+1)*f)*g)*REAL.vs};
+const H=(x,z)=>REAL?Hr(x,z):Hp(x,z);
+
+const renderer=new THREE.WebGLRenderer({canvas:cv,antialias:false,powerPreference:'high-performance'});
+renderer.setPixelRatio(Math.min(devicePixelRatio,1.5));
+const scene=new THREE.Scene(),camera=new THREE.PerspectiveCamera(65,1,.1,3000);
+scene.add(new THREE.HemisphereLight(0xffffff,0x334455,.9));
+const sun=new THREE.DirectionalLight(0xffffff,1);sun.position.set(100,160,60);scene.add(sun);
+/* ---------- GPU terrain: shared LOD grids with skirts, height computed in the vertex shader ---------- */
+const HT0=new THREE.DataTexture(new Float32Array(1),1,1,THREE.RedFormat,THREE.FloatType);HT0.needsUpdate=true;
+const GT0=new THREE.DataTexture(new Uint8Array([200,200,200,255]),1,1);GT0.needsUpdate=true;
+const U={uGeo:{value:GT0},uGeoOn:{value:0},uReal:{value:0},uHM:{value:HT0},uHW:{value:new THREE.Vector2(1,1)},uCtr:{value:new THREE.Vector2()},uPS:{value:1},uVS:{value:1/60},uMax:{value:1},uAmp:{value:40},uSeed:{value:new THREE.Vector2()},uLo:{value:new THREE.Vector3()},uHi:{value:new THREE.Vector3()},uGlow:{value:0},uFogC:{value:new THREE.Color()},uFogD:{value:.003},uSun:{value:new THREE.Vector3(.5,.8,.3).normalize()}};
+const VS=`uniform float uAmp;uniform vec2 uSeed;uniform int uOct;attribute float aSk;
+varying vec3 vN;varying float vH,vD;varying vec2 vXZ;
+float ih(ivec2 p){uint h=uint(p.x)*374761393u+uint(p.y)*668265263u;h=(h^(h>>13))*1274126177u;return float(h^(h>>16))/4294967295.0;}
+float vn(vec2 p){vec2 i=floor(p),f=fract(p),u=f*f*(3.-2.*f);ivec2 q=ivec2(i);
+ return mix(mix(ih(q),ih(q+ivec2(1,0)),u.x),mix(ih(q+ivec2(0,1)),ih(q+ivec2(1,1)),u.x),u.y);}
+uniform int uReal;uniform sampler2D uHM;uniform vec2 uHW,uCtr;uniform float uPS,uVS;
+float hm(ivec2 q){q=clamp(q,ivec2(0),ivec2(uHW)-1);return texelFetch(uHM,q,0).r;}
+float H(vec2 p){if(uReal==1){vec2 t=p/uPS+uCtr-.5;ivec2 q=ivec2(floor(t));vec2 f=t-floor(t);return mix(mix(hm(q),hm(q+ivec2(1,0)),f.x),mix(hm(q+ivec2(0,1)),hm(q+ivec2(1,1)),f.x),f.y)*uVS;}p=(p+uSeed)*.008;float a=1.,s=0.;for(int o=0;o<5;o++){s+=o<uOct?a*vn(p):a*.5;a*=.5;p*=2.1;}return(s-.97)*uAmp*2.;}
+void main(){vec3 w=(modelMatrix*vec4(position,1.)).xyz;float e=2.,h=H(w.xz);
+ vN=normalize(vec3(H(w.xz-vec2(e,0.))-H(w.xz+vec2(e,0.)),2.*e,H(w.xz-vec2(0.,e))-H(w.xz+vec2(0.,e))));
+ vXZ=w.xz;vH=h;w.y=h-aSk*14.;vD=distance(cameraPosition,w);gl_Position=projectionMatrix*viewMatrix*vec4(w,1.);}`;
+const FS=`uniform vec3 uLo,uHi,uFogC,uSun;uniform float uAmp,uGlow,uFogD;uniform int uReal,uGeoOn;uniform float uMax;uniform sampler2D uGeo;uniform vec2 uHW,uCtr;uniform float uPS;varying vec3 vN;varying float vH,vD;varying vec2 vXZ;
+void main(){vec3 n=normalize(vN);float t=clamp(vH/(uAmp*1.2)+.5,0.,1.);
+ vec3 c=mix(uLo,uHi,t);if(uReal==1){float e=vH/uMax;c=mix(vec3(.2,.38,.14),vec3(.5,.42,.3),smoothstep(.02,.4,e));c=mix(c,vec3(.95),smoothstep(.55,.85,e));if(vH<=.02)c=vec3(.04,.2,.4);}if(uReal==1&&uGeoOn==1&&vH>.02){vec2 uv=(vXZ/uPS+uCtr)/uHW;uv.y=1.-uv.y;c=mix(c,texture2D(uGeo,uv).rgb,.7);}c=mix(c,vec3(.32,.3,.3),smoothstep(.25,.55,1.-n.y));
+ c*=.35+.65*max(dot(n,uSun),0.);
+ c+=vec3(.2,.9,.8)*smoothstep(.46,.5,abs(fract(vH/(uAmp*.1))-.5))*uGlow*.8;
+ c=mix(uFogC,c,exp(-uFogD*uFogD*vD*vD));gl_FragColor=vec4(c,1.);
+#include <colorspace_fragment>
+}`;
+function grid(n){const CSZ=128,v=[],a=[],ix=[],s=CSZ/n,h=CSZ/2;
+ for(let j=0;j<=n;j++)for(let i=0;i<=n;i++){v.push(i*s-h,0,j*s-h);a.push(0)}
+ for(let j=0;j<n;j++)for(let i=0;i<n;i++){const k=j*(n+1)+i;ix.push(k,k+n+1,k+1,k+1,k+n+1,k+n+2)}
+ const r=f=>{const L=[];for(let t=0;t<=n;t++)L.push(f(t));return L};
+ [r(t=>t),r(t=>n*(n+1)+t),r(t=>t*(n+1)),r(t=>t*(n+1)+n)].forEach(L=>{const b=v.length/3;
+  L.forEach(k=>{v.push(v[k*3],0,v[k*3+2]);a.push(1)});for(let t=0;t<n;t++)ix.push(L[t],b+t,L[t+1],L[t+1],b+t,b+t+1)});
+ const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(v,3));
+ g.setAttribute('aSk',new THREE.Float32BufferAttribute(a,1));g.setIndex(ix);g.boundingSphere=new THREE.Sphere(new THREE.Vector3(),230);return g}
+const CS=128,R=9,chunks=new Map(),LODN=[96,48,24,12],LODO=[5,5,3,2];
+const geos=LODN.map(grid),mats=LODN.map((n,i)=>new THREE.ShaderMaterial({uniforms:{...U,uOct:{value:LODO[i]}},vertexShader:VS,fragmentShader:FS,side:THREE.DoubleSide}));
+let lcx=1e9,lcz=1e9;
+function lodUpdate(){const cx=Math.round(pl.x/CS),cz=Math.round(pl.z/CS);if(cx===lcx&&cz===lcz)return;lcx=cx;lcz=cz;
+ for(let i=-R;i<=R;i++)for(let j=-R;j<=R;j++){const k=(cx+i)+','+(cz+j),d=Math.max(Math.abs(i),Math.abs(j)),l=d<2?0:d<4?1:d<7?2:3;let m=chunks.get(k);
+  if(!m){m=new THREE.Mesh(geos[l],mats[l]);m.position.set((cx+i)*CS,0,(cz+j)*CS);m.matrixAutoUpdate=false;m.updateMatrix();m.userData.l=l;scene.add(m);chunks.set(k,m)}
+  else if(m.userData.l!==l){m.geometry=geos[l];m.material=mats[l];m.userData.l=l}}
+ for(const[k,m]of chunks){const[x,z]=k.split(',');if(Math.abs(x-cx)>R||Math.abs(z-cz)>R){scene.remove(m);chunks.delete(k)}}}
+function applyBiome(){U.uAmp.value=P.amp;U.uSeed.value.set(SX,SZ);U.uLo.value.set(...P.lo);U.uHi.value.set(...P.hi);U.uFogC.value.set(P.sky);U.uFogD.value=P.fog*.45}
+
+const sv=[];for(let i=0;i<3000;i++){const a=Math.random()*6.283,b=Math.acos(2*Math.random()-1);sv.push(900*Math.sin(b)*Math.cos(a),900*Math.cos(b),900*Math.sin(b)*Math.sin(a))}
+const sg=new THREE.BufferGeometry();sg.setAttribute('position',new THREE.Float32BufferAttribute(sv,3));
+const stars=new THREE.Points(sg,new THREE.PointsMaterial({color:0xffffff,size:1.6,sizeAttenuation:false,transparent:true,opacity:0,fog:false}));scene.add(stars);
+scene.fog=new THREE.FogExp2(0x7aa7d8,.006);
+function setBiome(k){biome=k;P=PRE[k];SX=Math.round(Math.random()*1e4);SZ=Math.round(Math.random()*7e3);applyBiome();
+ scene.background=new THREE.Color(P.sky);scene.fog.color.set(P.sky);scene.fog.density=P.fog;stars.material.opacity=P.stars;log('World: '+k)}
+$('prompt').onsubmit=e=>{e.preventDefault();let k=null;
+ for(const w of $('txt').value.toLowerCase().split(/\W+/)){if(PRE[w]){k=w;break}if(SYN[w]){k=SYN[w];break}}
+ k?setBiome(k):log('No match. Phase 1 reads keywords only (LLM parsing comes later). Try: '+Object.keys(PRE).join(', '))};
+
+/* ---------- player, avatar (you), signal visuals ---------- */
+const pl=new THREE.Vector3(0,0,0);let yaw=0,pitch=.35,lift=0,inv=false;
+const AW=256,AH=192,src=document.createElement('canvas'),out=document.createElement('canvas');
+src.width=out.width=AW;src.height=out.height=AH;
+const sctx=src.getContext('2d',{willReadFrequently:true}),octx=out.getContext('2d');
+const tex=new THREE.CanvasTexture(out);tex.colorSpace=THREE.SRGBColorSpace;tex.wrapS=THREE.RepeatWrapping;tex.repeat.x=-1;
+const av=new THREE.Mesh(new THREE.PlaneGeometry(4.27,3.2),new THREE.MeshBasicMaterial({map:tex,transparent:true,side:THREE.DoubleSide,fog:false}));scene.add(av);
+const bars=[];for(let i=0;i<32;i++){const m=new THREE.Mesh(new THREE.BoxGeometry(.5,1,.5),new THREE.MeshBasicMaterial({color:new THREE.Color().setHSL(i/32,.8,.55)}));scene.add(m);bars.push(m)}
+const wg=new THREE.BufferGeometry();wg.setAttribute('position',new THREE.BufferAttribute(new Float32Array(128*3),3));
+const wave=new THREE.Line(wg,new THREE.LineBasicMaterial({color:0x5fe0c0}));scene.add(wave);
+const pulse=new THREE.Mesh(new THREE.SphereGeometry(.35,16,12),new THREE.MeshBasicMaterial({color:0xff4060}));scene.add(pulse);pulse.visible=false;
+
+/* ---------- vision: webcam -> person mask + motion energy ---------- */
+let seg=null,prev=null,lastSeg=0;
+function vision(ts){if(!cam.videoWidth||ts-lastSeg<33)return;lastSeg=ts;runPose(ts);
+ sctx.drawImage(cam,0,0,AW,AH);const img=sctx.getImageData(0,0,AW,AH),d=img.data,n=AW*AH,cur=new Uint8Array(n);
+ for(let i=0;i<n;i++)cur[i]=(d[i*4]+d[i*4+1]*2+d[i*4+2])>>2;
+ if(prev){let mo=0;for(let i=0;i<n;i+=4)mo+=Math.abs(cur[i]-prev[i]);sig('cam.motion',mo/(n/4))}prev=cur;
+ const fin=m=>{let pc=0;for(let i=0;i<n;i++){const q=(m?m[i]>0:true)!==inv;d[i*4+3]=q?255:0;pc+=q}
+  sig('cam.person%',pc/n*100);octx.putImageData(img,0,0);tex.needsUpdate=true};
+ if(mode===1);else if(seg)seg.segmentForVideo(src,ts,r=>fin(r.categoryMask.getAsUint8Array()));else fin(null)}
+
+/* ---------- audio in (analysis) and audio out (sonification) ---------- */
+let ac,an,fd,td,rms=0,o1,o2,g,sndOn=false;
+function audio(){if(!an)return;an.getByteFrequencyData(fd);an.getByteTimeDomainData(td);
+ let s=0;for(let i=0;i<td.length;i++){const v=(td[i]-128)/128;s+=v*v}rms=Math.sqrt(s/td.length);
+ let pk=1;for(let i=1;i<fd.length;i++)if(fd[i]>fd[pk])pk=i;let b=0;for(let i=0;i<8;i++)b+=fd[i];
+ sig('mic.rms',rms);sig('mic.peakHz',pk*ac.sampleRate/an.fftSize);sig('mic.bass',b/8/255)}
+function snd(){if(!ac)return log('Press Start first.');
+ if(!o1){g=ac.createGain();g.gain.value=0;o1=ac.createOscillator();o2=ac.createOscillator();o1.connect(g);o2.connect(g);g.connect(ac.destination);o1.start();o2.start()}
+ sndOn=!sndOn;g.gain.setTargetAtTime(sndOn?.04:0,ac.currentTime,.1)}
+
+/* ---------- device inputs ---------- */
+$('go').onclick=async()=>{try{
+ const ms=await navigator.mediaDevices.getUserMedia({video:{width:640,height:480},audio:{echoCancellation:false,noiseSuppression:false}});
+ cam.srcObject=ms;await cam.play();ac=new AudioContext();an=ac.createAnalyser();an.fftSize=1024;an.smoothingTimeConstant=.7;
+ ac.createMediaStreamSource(ms).connect(an);fd=new Uint8Array(an.frequencyBinCount);td=new Uint8Array(an.fftSize);
+ if(typeof DeviceMotionEvent?.requestPermission==='function')await DeviceMotionEvent.requestPermission();
+ addEventListener('devicemotion',e=>{const a=e.accelerationIncludingGravity;if(a&&a.x!=null){sig('imu.ax',a.x);sig('imu.ay',a.y);sig('imu.az',a.z)}});
+ log('Camera and mic live. Loading segmentation model...');
+ try{const fs=await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+  seg=await ImageSegmenter.createFromOptions(fs,{baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite',delegate:'GPU'},runningMode:'VIDEO',outputCategoryMask:true,outputConfidenceMasks:false});
+  log('Live. Loading body and hand models...');await initBody(fs)}
+ catch(e){log('Camera works, segmentation failed ('+e.message+'). Showing the full frame.')}
+}catch(e){log('Start failed: '+e.message)}};
+$('hr').onclick=async()=>{try{const d=await navigator.bluetooth.requestDevice({filters:[{services:['heart_rate']}]});
+ const c=await(await(await d.gatt.connect()).getPrimaryService('heart_rate')).getCharacteristic('heart_rate_measurement');await c.startNotifications();
+ c.addEventListener('characteristicvaluechanged',e=>{const v=e.target.value;sig('hr.bpm',v.getUint8(0)&1?v.getUint16(1,true):v.getUint8(1))});log('Heart rate connected.')}
+ catch(e){log('Heart rate: '+e.message+' (needs Chrome/Edge and a BLE strap)')}};
+$('ser').onclick=async()=>{try{const p=await navigator.serial.requestPort();await p.open({baudRate:115200});
+ const r=p.readable.pipeThrough(new TextDecoderStream()).getReader();let b='';log('Serial open. Send lines like: 1.2,0.7,3');
+ for(;;){const{value,done}=await r.read();if(done)break;b+=value;let l;
+  while((l=b.indexOf('\n'))>=0){const t=b.slice(0,l).trim();b=b.slice(l+1);t.split(/[,\s]+/).forEach((x,i)=>{const v=parseFloat(x);if(!isNaN(v))sig('serial.'+i,v)})}}}
+ catch(e){log('Serial: '+e.message+' (needs Chrome/Edge)')}};
+$('ws').onclick=()=>{const w=new WebSocket('ws://localhost:8765');w.onopen=()=>log('WebSocket connected.');w.onerror=()=>log('WebSocket: no server on ws://localhost:8765');
+ w.onmessage=e=>{try{const o=JSON.parse(e.data);for(const k in o)if(typeof o[k]==='number')sig('ws.'+k,o[k])}catch{}}};
+
+/* ---------- phase 2: pose-tracked avatar, hand interaction, orbs, signal beacons ---------- */
+let mode=1,pose=null,hands=null,nh=0,simOn=false,HR=[],WR=null;
+const SC=2.2,body=new THREE.Group();scene.add(body);av.visible=false;
+const LM=Array.from({length:33},()=>new THREE.Vector3()),M4=new THREE.Matrix4(),Q0=new THREE.Quaternion(),Q1=new THREE.Quaternion(),V1=new THREE.Vector3(),V2=new THREE.Vector3(),V3=new THREE.Vector3(),UPV=new THREE.Vector3(0,1,0),SV=new THREE.Vector3(),ZM=new THREE.Matrix4().makeScale(0,0,0);
+const BONES=[[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24],[23,25],[25,27],[24,26],[26,28],[27,31],[28,32],[15,19],[16,20],[0,11],[0,12]];
+const JM=new THREE.InstancedMesh(new THREE.SphereGeometry(.07,8,6),new THREE.MeshBasicMaterial({color:0x7fffe0}),33),
+ BM=new THREE.InstancedMesh(new THREE.CylinderGeometry(.035,.035,1,6),new THREE.MeshBasicMaterial({color:0x2fbfa0}),BONES.length),
+ HM=new THREE.InstancedMesh(new THREE.SphereGeometry(.04,8,6),new THREE.MeshBasicMaterial({color:0xffd24a}),42);
+[JM,BM,HM].forEach(m=>{m.frustumCulled=false;body.add(m)});JM.visible=BM.visible=false;for(let i=0;i<42;i++)HM.setMatrixAt(i,ZM);
+const HP=[0,1].map(()=>({on:false,pinch:false,has:false,pt:new THREE.Vector3(),tip:new THREE.Vector3(),vel:new THREE.Vector3(),t:0}));
+const d2=(a,b)=>Math.hypot((a.x-b.x)*1.333,a.y-b.y);
+async function initBody(fs){try{
+ pose=await PoseLandmarker.createFromOptions(fs,{baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task',delegate:'GPU'},runningMode:'VIDEO',numPoses:1});
+ hands=await HandLandmarker.createFromOptions(fs,{baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',delegate:'GPU'},runningMode:'VIDEO',numHands:2});
+ log('Live. V cycles view (cutout, avatar, both). I inverts the mask. Pinch to grab orbs, N for simulated signals.')}
+ catch(e){log('Body models failed: '+e.message)}}
+function runPose(ts){
+ if(pose){const r=pose.detectForVideo(cam,ts),w=r.worldLandmarks[0];
+  if(w){w.forEach((p,i)=>LM[i].lerp(V1.set(-p.x*SC,-p.y*SC,-p.z*SC),.6));WR=r.landmarks[0];
+   sig('pose.armspan',LM[15].distanceTo(LM[16]));sig('pose.handsUp',-(LM[15].y+LM[16].y)/2)}}
+ if(!hands||!WR)return;
+ HR=hands.detectForVideo(cam,ts).landmarks;nh=HR.length;
+ for(let i=0;i<42;i++)HM.setMatrixAt(i,ZM);HP.forEach(h=>{h.on=false});const now=ts/1000;
+ for(const lm of HR){let b=-1,bd=.3;[15,16].forEach((wi,i)=>{const d=Math.hypot(lm[0].x-WR[wi].x,lm[0].y-WR[wi].y);if(d<bd){bd=d;b=i}});
+  if(b<0)continue;const hd=HP[b],W=LM[15+b],hs=.2/Math.max(.02,d2(lm[0],lm[9])),P3=[];
+  for(let i=0;i<21;i++){const p=new THREE.Vector3(W.x-(lm[i].x-lm[0].x)*1.333*hs,W.y-(lm[i].y-lm[0].y)*hs,W.z-(lm[i].z-lm[0].z)*1.333*hs);
+   P3.push(p);SV.setScalar(1);M4.compose(p,Q0,SV);HM.setMatrixAt(b*21+i,M4)}
+  const r=d2(lm[4],lm[8])/d2(lm[0],lm[9]);hd.pinch=hd.pinch?r<.5:r<.3;if(!hd.pinch)hd.has=false;
+  V2.addVectors(P3[4],P3[8]).multiplyScalar(.5);body.localToWorld(V2);
+  const dtp=Math.max(.016,now-hd.t);if(hd.t)V3.copy(V2).sub(hd.pt).divideScalar(dtp);else V3.set(0,0,0);
+  hd.vel.lerp(V3,.5).clampLength(0,40);hd.t=now;hd.pt.copy(V2);hd.tip.copy(P3[8]);body.localToWorld(hd.tip);hd.on=true}
+ HM.instanceMatrix.needsUpdate=true}
+function avatarUpdate(){body.position.set(pl.x,pl.y+1.9,pl.z);body.rotation.y=yaw;body.updateMatrixWorld();
+ if(!WR){JM.visible=BM.visible=false;return}JM.visible=BM.visible=true;
+ LM.forEach((p,i)=>{SV.setScalar(i?1:2.8);M4.compose(p,Q0,SV);JM.setMatrixAt(i,M4)});JM.instanceMatrix.needsUpdate=true;
+ BONES.forEach(([i,j],k)=>{V1.subVectors(LM[j],LM[i]);const len=V1.length();if(len<1e-4)return;Q1.setFromUnitVectors(UPV,V1.divideScalar(len));
+  SV.set(1,len,1);V2.addVectors(LM[i],LM[j]).multiplyScalar(.5);M4.compose(V2,Q1,SV);BM.setMatrixAt(k,M4)});BM.instanceMatrix.needsUpdate=true}
+/* orbs: grab with a pinch, throw on release, poke with a fingertip */
+const ORB=[],OG=new THREE.SphereGeometry(.45,16,12);
+function spawn(m){const a=Math.random()*6.28,r=6+Math.random()*14;m.position.set(pl.x+Math.cos(a)*r,0,pl.z+Math.sin(a)*r);m.position.y=H(m.position.x,m.position.z)+1;m.userData.v.set(0,0,0);m.userData.held=null}
+for(let i=0;i<24;i++){const m=new THREE.Mesh(OG,new THREE.MeshBasicMaterial({color:new THREE.Color().setHSL(i/24,.9,.6)}));m.userData={v:new THREE.Vector3(),held:null};scene.add(m);ORB.push(m);spawn(m)}
+function interactOld(dt){for(const o of ORB){const u=o.userData;o.scale.setScalar(1+rms*2);
+  if(u.held!==null){const hd=HP[u.held];if(hd.pinch&&hd.on){o.position.copy(hd.pt);u.v.copy(hd.vel);continue}u.held=null}
+  for(let h=0;h<2;h++){const hd=HP[h];if(!hd.on)continue;
+   if(hd.pinch&&!hd.has&&hd.pt.distanceTo(o.position)<1.6){u.held=h;hd.has=true;break}
+   if(!hd.pinch&&hd.tip.distanceTo(o.position)<.9)u.v.addScaledVector(V1.subVectors(o.position,hd.tip).normalize(),150*dt)}
+  if(u.held!==null)continue;
+  u.v.y-=22*dt;u.v.clampLength(0,45);o.position.addScaledVector(u.v,dt);u.v.multiplyScalar(1-.3*dt);
+  const g=H(o.position.x,o.position.z)+.45;if(o.position.y<g){o.position.y=g;if(u.v.y<0)u.v.y*=-.55;u.v.x*=.96;u.v.z*=.96}
+  if(o.position.distanceTo(pl)>70)spawn(o)}}
+/* any non-camera/mic signal becomes a beam on a ring around you; N feeds synthetic RF/mains/EEG/EMF test signals */
+const BC=[];
+function beacons(){labels();streetPhoto().catch(()=>{});Object.keys(S).filter(k=>!/^(mic|cam|pose)/.test(k)).slice(0,8).forEach((k,i)=>{let b=BC[i];
+  if(!b){b=BC[i]=new THREE.Mesh(new THREE.BoxGeometry(.8,1,.8),new THREE.MeshBasicMaterial({color:new THREE.Color().setHSL(i/8+.1,.9,.6),transparent:true,opacity:.75}));scene.add(b)}
+  const s=S[k],lo=Math.min(...s.h),h=.3+(s.v-lo)/((Math.max(...s.h)-lo)||1)*8,a=i/8*6.283+.4,x=pl.x+Math.cos(a)*12,z=pl.z+Math.sin(a)*12;
+  b.scale.y=h;b.position.set(x,H(x,z)+h/2,z)})}
+function sim(t){if(!simOn)return;sig('sim.rf_dbm',-60+8*Math.sin(t*.7)+3*(Math.random()-.5));sig('sim.mains_hz',50+.05*Math.sin(t*.3)+.02*(Math.random()-.5));
+ sig('sim.eeg_alpha',Math.sin(t*62.8)*.5+Math.random()-.5);sig('sim.emf',Math.random()<.03?5:Math.random())}
+
+/* ---------- phase 3: Ollama text->world, real elevation/names/geology, Gaia galaxy ---------- */
+let gal=false,near='',sexp=0,gy=0,gp=0,GK=1,gpts=null,GM=null;const G={org:[0,0,0],pos:null,info:'',cat:'',t:0,tgt:''},GT={},LB=[];
+const clamp=(v,a,b)=>Math.min(b,Math.max(a,v));
+const TG={'galaxy overview':[266.42,-29.01,8180,30000],'galactic center':[266.42,-29.01,8180,600],'alpha centauri':[219.9,-60.83,1.34,2],sirius:[101.29,-16.72,2.64,3],vega:[279.23,38.78,7.68,3],betelgeuse:[88.79,7.41,168,25],rigel:[78.63,-8.2,264,25],polaris:[37.95,89.26,133,20],'orion nebula':[83.82,-5.39,412,15],pleiades:[56.75,24.12,136,15],'crab nebula':[83.63,22.01,2000,40],sun:[0,0,0,3]};
+const AL={'milky way':'galaxy overview','our galaxy':'galaxy overview','whole galaxy':'galaxy overview','sagittarius a':'galactic center','sgr a':'galactic center','black hole':'galactic center','centauri':'alpha centauri','orion':'orion nebula','solar system':'sun','earth':'sun'};
+const findT=t=>{t=(t||'').toLowerCase();return Object.keys(TG).find(k=>t.includes(k))||AL[Object.keys(AL).find(a=>t.includes(a))]};
+function mkLabel(text,col){const c=document.createElement('canvas');c.width=512;c.height=96;const x=c.getContext('2d');
+ x.font='bold 34px sans-serif';x.fillStyle='rgba(4,12,20,.65)';x.fillRect(0,0,512,96);x.fillStyle=col;x.textAlign='center';x.textBaseline='middle';x.fillText(text.slice(0,26),256,48);
+ const t=new THREE.CanvasTexture(c);t.colorSpace=THREE.SRGBColorSpace;
+ const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:t,depthTest:false,transparent:true,fog:false}));sp.center.set(.5,0);sp.renderOrder=10;return sp}
+
+/* ----- LLM: text -> JSON scene parameters (Ollama, local) ----- */
+async function askLLM(t){const SYS=`You convert a request into JSON for a 3D world simulator. Reply with JSON only: {"mode":"place"|"procedural"|"galaxy","place":"real place name if mode is place, else empty","scale":"street to walk through a city or buildings, else region","biome":"earth|forest|desert|ocean|snow|mars|space","sky":"#rrggbb","amp":10-90,"fog":0.002-0.015,"lo":[r,g,b],"hi":[r,g,b],"target":"one of: ${Object.keys(TG).join(', ')} or empty"}. Use mode place for any real location (mountain, city, canyon, volcano, island, landmark). Use mode galaxy for space, stars, galaxy, satellite, orbit, nebula. Use mode procedural for fictional or generic landscapes. lo and hi are low and high terrain colors with values 0 to 1.`;
+ const r=await fetch('http://localhost:11434/api/generate',{method:'POST',body:JSON.stringify({model:$('mdl').value,system:SYS,prompt:t,stream:false,format:'json',options:{temperature:.2}})});
+ if(!r.ok)throw new Error('HTTP '+r.status);return JSON.parse((await r.json()).response)}
+function kw(t){const w=t.toLowerCase().split(/\W+/);
+ if(w.some(x=>['galaxy','space','stars','satellite','orbit','nebula'].includes(x)))return{mode:'galaxy',target:findT(t)||''};
+ const k=w.map(x=>PRE[x]?x:SYN[x]).find(Boolean);return k?{mode:'procedural',biome:k}:{mode:'place',place:t}}
+$('prompt').onsubmit=async e=>{e.preventDefault();const t=$('txt').value.trim();if(!t)return;log('Asking local LLM...');let j;
+ try{j=await askLLM(t)}catch(err){log('Ollama unavailable ('+err.message+'). Using keyword fallback.');j=kw(t)}
+ await apply(j,t)};
+async function apply(j,t){
+ if(j.mode==='galaxy')return enterGalaxy(findT(j.target)||findT(t)||'galaxy overview');
+ exitGalaxy();clearLabels();
+ if(j.mode==='place'&&(j.place||t)){try{await loadPlace(j.place||t,j.scale==='street'||/street|walk|city|building/i.test(t))}catch(e){log('Place failed: '+e.message)}return}
+ REAL=null;U.uReal.value=0;const k=PRE[j.biome]?j.biome:'earth';setBiome(k);
+ const sky=/^#?[0-9a-f]{6}$/i.test(j.sky||'')?parseInt(j.sky.replace('#',''),16):P.sky,vec=(v,d)=>Array.isArray(v)&&v.length===3&&v.every(x=>x>=0&&x<=1)?v:d;
+ P={...P,sky,amp:clamp(+j.amp||P.amp,6,95),fog:clamp(+j.fog||P.fog,.002,.015),lo:vec(j.lo,P.lo),hi:vec(j.hi,P.hi)};
+ applyBiome();scene.background=new THREE.Color(P.sky);scene.fog.color.set(P.sky);scene.fog.density=P.fog;log('World ('+k+'): '+t)}
+
+/* ----- real places: Nominatim geocode, AWS Terrarium elevation tiles, Overpass names, Macrostrat geology ----- */
+const mPerDegLat=110574,mPerDegLon=()=>111320*Math.cos(REAL.lat*Math.PI/180);
+const toW=(la,lo)=>[(lo-REAL.lon)*mPerDegLon()/REAL.mu,-(la-REAL.lat)*mPerDegLat/REAL.mu];
+const toLL=(x,z)=>[REAL.lat-z*REAL.mu/mPerDegLat,REAL.lon+x*REAL.mu/mPerDegLon()];
+function clearLabels(){if(bmesh){scene.remove(bmesh);bmesh=null;BG=null;if(bcol&&RW){RW.removeCollider(bcol,false);bcol=null}}LB.forEach(l=>{scene.remove(l.s);l.s.material.map.dispose();l.s.material.dispose()});LB.length=0;$('geo').textContent=''}
+async function loadPlace(name,street){clearLabels();log('Geocoding '+name+'...');
+ const g=await(await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q='+encodeURIComponent(name))).json();if(!g[0])throw new Error('place not found');
+ const lat=+g[0].lat,lon=+g[0].lon,z=street?14:10,mu=street?1/2.2:100,n=2**z,xt=(lon+180)/360*n,yt=(1-Math.asinh(Math.tan(lat*Math.PI/180))/Math.PI)/2*n,x0=Math.floor(xt)-2,y0=Math.floor(yt)-2,N=5,W=N*256,a=new Float32Array(W*W);let ok=0;
+ log('Fetching elevation tiles for '+g[0].display_name.slice(0,60)+'...');
+ await Promise.all([...Array(N*N).keys()].map(async k=>{const tx=k%N,ty=(k/N)|0;try{
+  const bm=await createImageBitmap(await(await fetch(`https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${x0+tx}/${y0+ty}.png`)).blob(),{colorSpaceConversion:'none',premultiplyAlpha:'none'});
+  const c=new OffscreenCanvas(256,256),cx=c.getContext('2d');cx.drawImage(bm,0,0);const d=cx.getImageData(0,0,256,256).data;
+  for(let i=0;i<65536;i++)a[(ty*256+(i>>8))*W+tx*256+(i&255)]=Math.max(0,d[i*4]*256+d[i*4+1]+d[i*4+2]/256-32768);ok++}catch{}}));
+ if(!ok)throw new Error('no elevation tiles (network or CORS)');
+ let mx=0;for(let i=0;i<a.length;i++)if(a[i]>mx)mx=a[i];
+ REAL={a,w:W,h:W,ps:40075016.686*Math.cos(lat*Math.PI/180)/(256*n)/mu,cx:(xt-x0)*256,cy:(yt-y0)*256,vs:street?1/mu:1/60,x0,y0,z,mu,street,q:name,lat,lon,name:g[0].display_name};
+ const T=new THREE.DataTexture(a,W,W,THREE.RedFormat,THREE.FloatType);T.needsUpdate=true;
+ U.uHM.value=T;U.uHW.value.set(W,W);U.uCtr.value.set(REAL.cx,REAL.cy);U.uPS.value=REAL.ps;U.uVS.value=REAL.vs;U.uMax.value=Math.max(1,mx*REAL.vs);U.uReal.value=1;U.uGeoOn.value=0;U.uGeo.value=GT0;
+ P={...PRE.earth,fog:street?.004:.0018};SX=SZ=0;applyBiome();scene.background=new THREE.Color(P.sky);scene.fog.color.set(P.sky);scene.fog.density=P.fog;stars.material.opacity=0;
+ pl.set(0,0,0);lift=0;log(`${g[0].display_name.slice(0,70)}\nlat ${lat.toFixed(4)} lon ${lon.toFixed(4)} | peak ${mx|0} m | tiles ${ok}/25\nWorld: 1 unit = ${mu.toFixed(2)} m, ${street?'true scale (1 m = 2.2 units)':'height 1.67x exaggerated'}`);
+ geo(lat,lon);loadFeatures(lat,lon,street?.03:1).catch(e=>log($('st').textContent+'\nNames failed: '+e.message));live4(street)}
+async function loadFeatures(lat,lon,sc=1){const a=`(around:`,b=`,${lat},${lon})`;
+ const q=`[out:json][timeout:25];(node["place"~"^(city|town)$"]["name"]${a}${60000*sc}${b};node["natural"~"^(peak|volcano)$"]["name"]${a}${50000*sc}${b};node["man_made"~"^(tower|lighthouse)$"]["name"]${a}${40000*sc}${b};node["historic"~"^(monument|castle)$"]["name"]${a}${40000*sc}${b};node["tourism"="attraction"]["name"]${a}${25000*sc}${b};);out 150;`;
+ const els=(await(await fetch('https://overpass-api.de/api/interpreter?data='+encodeURIComponent(q))).json()).elements,cnt={};
+ const typ=t=>t.place||t.natural||t.man_made||t.historic||'attraction',cap={city:15,town:10,peak:20,volcano:6};
+ els.sort((p,q)=>(+q.tags.ele||0)-(+p.tags.ele||0));
+ for(const e of els){const t=e.tags,ty=typ(t);cnt[ty]=(cnt[ty]||0)+1;if(cnt[ty]>(cap[ty]||8)||!REAL)continue;
+  const nm=t['name:en']||t.name,[x,z]=toW(e.lat,e.lon),sp=mkLabel(nm+(t.ele?' '+Math.round(t.ele)+' m':''),ty==='city'||ty==='town'?'#ffd98a':ty==='peak'||ty==='volcano'?'#bfe8ff':'#9fe8d6');
+  const y=H(x,z)+4;sp.position.set(x,y,z);scene.add(sp);LB.push({s:sp,x,z,nm,ty,lat:e.lat,lon:e.lon})}
+ $('st').textContent+='\n'+LB.length+' named features loaded (OpenStreetMap)'}
+async function geo(lat,lon){try{const d=(await(await fetch(`https://macrostrat.org/api/v2/geologic_units/map?lat=${lat}&lng=${lon}&response=long`)).json()).success?.data?.[0];
+ $('geo').textContent=d?`Geology (Macrostrat): ${d.name||'unnamed'} | ${d.lith||'?'} | ${d.age||''}`:'Geology: no mapped unit here'}catch{$('geo').textContent='Geology lookup failed'}}
+let lf=0;
+function labels(){if(!REAL)return;const nb={d:1e9,l:null};
+ for(const l of LB){const d=camera.position.distanceTo(l.s.position),k=clamp(d*.03,1.2,30);l.s.scale.set(k*7.5,k*1.4,1);
+  const h=Math.hypot(pl.x-l.x,pl.z-l.z);if(h<nb.d){nb.d=h;nb.l=l}}
+ if(++lf%10===0){const[la,lo]=toLL(pl.x,pl.z);near=`${la.toFixed(3)},${lo.toFixed(3)} ${Math.round(pl.y/REAL.vs)} m`+(nb.l&&nb.d<60?` | near ${nb.l.nm} (${nb.l.ty})`:'')}}
+addEventListener('keydown',e=>{if(e.target.tagName==='INPUT')return;if(e.code==='KeyG'){if(REAL&&!gal){const[la,lo]=toLL(pl.x,pl.z);geo(la,lo)}else log('Load a real place first, e.g. "Mount Fuji"')}
+ if(e.code==='KeyT'&&gal){const ks=Object.keys(GT);warp(ks[(ks.indexOf(G.tgt)+1)%ks.length])}
+ if(e.code==='BracketRight')GK*=1.25;if(e.code==='BracketLeft')GK/=1.25});
+addEventListener('wheel',e=>{if(gal)sexp=clamp(sexp-e.deltaY*.002,-4,5)});
+
+/* ----- galaxy: float64 positions in parsecs, float32 copy re-based around the camera ----- */
+const EQ2G=[-.0548755604,-.8734370902,-.4838350155,.4941094279,-.44482963,.7469822445,-.867666149,-.1980763734,.4559837762];
+function eq(ra,dec,d,o,i){const a=ra*Math.PI/180,b=dec*Math.PI/180,x=Math.cos(b)*Math.cos(a),y=Math.cos(b)*Math.sin(a),z=Math.sin(b),M=EQ2G;
+ o[i]=(M[0]*x+M[1]*y+M[2]*z)*d;o[i+1]=(M[6]*x+M[7]*y+M[8]*z)*d;o[i+2]=-(M[3]*x+M[4]*y+M[5]*z)*d}
+const CR=[[.6,.75,1],[1,.97,.9],[1,.72,.42],[1,.45,.3]];
+function col(ci,o,i){const t=clamp((ci+.3)/2.6,0,.999)*3,k=Math.floor(t),f=t-k;for(let j=0;j<3;j++)o[i+j]=CR[k][j]+(CR[k+1][j]-CR[k][j])*f}
+const CAT=[{n:'Gaia DR3',k:1,q:'SELECT TOP 80000 RA_ICRS,DE_ICRS,Plx,Gmag,"BP-RP" FROM "I/355/gaiadr3" WHERE Plx>2 AND Gmag<12 AND "BP-RP" IS NOT NULL ORDER BY Gmag'},
+ {n:'Hipparcos',k:1.35,q:'SELECT RAICRS,DEICRS,Plx,Vmag,"B-V" FROM "I/239/hip_main" WHERE Plx>1 AND "B-V" IS NOT NULL'}];
+const GVS=`attribute float aL;attribute vec3 aC;uniform float uK;varying vec3 vC;varying float vA;
+void main(){vec4 mv=modelViewMatrix*vec4(position,1.);float d=max(length(mv.xyz),1e-4);float raw=20.*uK*sqrt(aL)/d;
+ gl_PointSize=clamp(raw,1.5,48.);vA=clamp(raw/1.5,.08,1.)*smoothstep(.002,.05,d);vC=aC;gl_Position=projectionMatrix*mv;}`;
+const GFS=`varying vec3 vC;varying float vA;void main(){float r=length(gl_PointCoord-.5)*2.;if(r>1.)discard;gl_FragColor=vec4(vC*(1.-r*r*.7),vA);}`;
+function fill(){const a=gpts.geometry.attributes.position.array,p=G.pos,o=G.org;
+ for(let i=0;i<p.length;i+=3){a[i]=p[i]-o[0];a[i+1]=p[i+1]-o[1];a[i+2]=p[i+2]-o[2]}gpts.geometry.attributes.position.needsUpdate=true;
+ for(const t of Object.values(GT))t.s.position.set(t.p[0]-o[0],t.p[1]-o[1],t.p[2]-o[2])}
+function rebase(){const c=camera.position;G.org=[G.org[0]+c.x,G.org[1]+c.y,G.org[2]+c.z];c.set(0,0,0);fill()}
+async function buildGalaxy(){if(gpts)return;let rows=[],src='synthetic model only';
+ for(const c of CAT){rows=[];try{log('Querying '+c.n+' (VizieR TAP)...');const ac=new AbortController(),to=setTimeout(()=>ac.abort(),40000);
+  const r=await fetch('https://tapvizier.cds.unistra.fr/TAPVizieR/tap/sync?REQUEST=doQuery&LANG=ADQL&FORMAT=csv&QUERY='+encodeURIComponent(c.q),{signal:ac.signal});clearTimeout(to);
+  if(!r.ok)throw new Error('HTTP '+r.status);rows=(await r.text()).trim().split('\n').slice(1).map(l=>l.split(',').map(Number)).filter(a=>a.length>=5&&a.every(Number.isFinite)&&a[2]>0);
+  if(rows.length>100){rows.forEach(a=>a[4]*=c.k);src=c.n+', '+rows.length+' real stars';break}}catch(e){console.warn(c.n,e)}rows=[]}
+ const NS=250000,N=rows.length+NS,P64=new Float64Array(N*3),L=new Float32Array(N),C=new Float32Array(N*3),gs=()=>(Math.random()+Math.random()+Math.random()-1.5)*1.6;
+ rows.forEach((a,i)=>{const d=1000/a[2];eq(a[0],a[1],d,P64,i*3);L[i]=Math.pow(10,-.4*(a[3]-5*Math.log10(d/10)-4.83));col(a[4],C,i*3)});
+ for(let k=0;k<NS;k++){const i=rows.length+k,bul=Math.random()<.2;let x,y,z;
+  if(bul){const r=Math.abs(gs())*1200,a=Math.random()*6.283,b=Math.acos(2*Math.random()-1);x=r*Math.sin(b)*Math.cos(a);y=r*Math.sin(b)*Math.sin(a);z=r*Math.cos(b)*.6;L[i]=6e3;C.set([1,.85,.6],i*3)}
+  else{const r=800+14500*Math.pow(Math.random(),.75),th=(Math.random()*4|0)*1.5708+4.7*Math.log(r/800)+gs()*.3;x=r*Math.cos(th);y=r*Math.sin(th);z=gs()*180;L[i]=2e4;C.set([.7+Math.random()*.2,.8,1],i*3)}
+  P64[i*3]=8180+x;P64[i*3+1]=z;P64[i*3+2]=-y}
+ const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(N*3),3));
+ geo.setAttribute('aL',new THREE.BufferAttribute(L,1));geo.setAttribute('aC',new THREE.BufferAttribute(C,3));
+ GM=new THREE.ShaderMaterial({uniforms:{uK:{value:1}},vertexShader:GVS,fragmentShader:GFS,transparent:true,depthTest:false,depthWrite:false,blending:THREE.AdditiveBlending});
+ gpts=new THREE.Points(geo,GM);gpts.frustumCulled=false;gpts.layers.set(1);scene.add(gpts);G.pos=P64;G.cat=src;
+ for(const[k,v]of Object.entries(TG)){const p=[0,0,0];eq(v[0],v[1],v[2],p,0);const sp=mkLabel(k,'#9fe8d6');sp.layers.set(1);scene.add(sp);GT[k]={p,s:sp,arr:v[3]}}
+ G.org=[0,0,0];fill()}
+function warp(k){const t=GT[k];if(!t)return;G.tgt=k;G.org=[...t.p];camera.position.set(.2,.35,1).normalize().multiplyScalar(t.arr);fill();camera.lookAt(0,0,0);gy=camera.rotation.y;gp=camera.rotation.x}
+async function enterGalaxy(k){log('Building galaxy...');await buildGalaxy();gal=true;camera.layers.set(1);camera.rotation.order='YXZ';scene.background=new THREE.Color(0x000004);
+ camera.near=1e-3;camera.far=1e7;camera.updateProjectionMatrix();cam.style.cssText='display:block;position:fixed;right:8px;bottom:8px;width:200px;transform:scaleX(-1);border:1px solid #2b4d52;border-radius:4px';
+ warp(k);log('Galaxy: '+G.cat+' + synthetic spiral model (250k points, not data).\nWASD/Space/C fly, wheel speed, T next target, [ ] brightness.')}
+function exitGalaxy(){if(!gal)return;gal=false;camera.layers.set(0);camera.rotation.order='XYZ';camera.near=.1;camera.far=3000;camera.updateProjectionMatrix();scene.background=new THREE.Color(P.sky);cam.style.cssText='display:none'}
+function galStep(dt,ts){camera.rotation.set(gp,gy,0);
+ const sp=Math.pow(10,sexp)*(keys.ShiftLeft?10:1),f=(keys.KeyW?1:0)-(keys.KeyS?1:0),s=(keys.KeyD?1:0)-(keys.KeyA?1:0),u=(keys.Space?1:0)-(keys.KeyC?1:0);
+ V1.set(s,u,-f).applyQuaternion(camera.quaternion).multiplyScalar(sp*dt);camera.position.add(V1);
+ if(camera.position.length()>50&&ts-G.t>100){G.t=ts;rebase()}
+ vision(ts);audio();sim(ts/1000);GM.uniforms.uK.value=GK*(1+rms*3);
+ for(const t of Object.values(GT)){const k=Math.max(1e-4,camera.position.distanceTo(t.s.position)*.03);t.s.scale.set(k*7.5,k*1.4,1)}
+ const w=[G.org[0]+camera.position.x,G.org[1]+camera.position.y,G.org[2]+camera.position.z];
+ G.info=`${sp.toExponential(1)} pc/s | Sun ${Math.hypot(...w).toFixed(1)} pc | Galactic center ${Math.hypot(w[0]-8180,w[1],w[2]).toFixed(0)} pc`;
+ renderer.render(scene,camera);fc++;ft+=dt;if(ft>.5){$('fps').textContent=`${Math.round(fc/ft)} fps | galaxy | ${G.info}`;fc=0;ft=0}}
+
+/* ---------- phase 4: depth rooms, splats, XR, Rapier physics, live data, street scale, social ---------- */
+const lib=async u=>{try{return await import(u)}catch(e){console.warn(u,e);return null}};
+const rig=new THREE.Group();rig.add(camera);scene.add(rig);renderer.xr.enabled=true;
+function xrCam(cp){if(renderer.xr.isPresenting){rig.position.set(pl.x,pl.y,pl.z);rig.rotation.y=yaw;rig.scale.setScalar(SC);camera.position.set(0,0,0)}
+ else{rig.position.set(0,0,0);rig.rotation.y=0;rig.scale.setScalar(1);camera.position.copy(cp);camera.lookAt(pl.x,pl.y+1.6,pl.z)}}
+function xrAxes(){const o=[0,0],ss=renderer.xr.getSession&&renderer.xr.getSession();if(!ss)return o;
+ for(const i of ss.inputSources){const a=i.gamepad&&i.gamepad.axes;if(a&&a.length>=4){o[0]+=a[2];o[1]+=a[3]}}return o}
+
+/* ----- monocular depth (Depth Anything V2 small, in-browser) -> colored point cloud of your room ----- */
+let depthPipe=null;const scans=[];
+async function initDepth(){if(depthPipe)return depthPipe;const t=await lib('transformers');if(!t)throw new Error('transformers.js failed to load');
+ try{depthPipe=await t.pipeline('depth-estimation','onnx-community/depth-anything-v2-small',{device:'webgpu',dtype:'fp16'})}
+ catch{depthPipe=await t.pipeline('depth-estimation','onnx-community/depth-anything-v2-small')}return depthPipe}
+async function scanRoom(){if(!cam.videoWidth)return log('Press Start first.');log('Estimating depth (first run downloads the model)...');
+ const p=await initDepth(),c=document.createElement('canvas'),w0=cam.videoWidth,h0=cam.videoHeight;c.width=w0;c.height=h0;const cx=c.getContext('2d');cx.drawImage(cam,0,0);
+ const px=cx.getImageData(0,0,w0,h0).data,d=(await p(c.toDataURL('image/jpeg',.9))).depth,w=d.width,h=d.height,STP=4,N=Math.ceil(w/STP)*Math.ceil(h/STP),pos=new Float32Array(N*3),cl=new Float32Array(N*3),tn=.577;let k=0;
+ for(let y=0;y<h;y+=STP)for(let x=0;x<w;x+=STP){const z=.5/(d.data[y*w+x]/255+.1),i=(((y*h0/h)|0)*w0+((x*w0/w)|0))*4;
+  pos.set([-(x/w-.5)*2*tn*z*SC,-(y/h-.5)*2*tn*z*(h/w)*SC,(.8-z)*SC],k*3);cl.set([px[i]/255,px[i+1]/255,px[i+2]/255],k*3);k++}
+ const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.BufferAttribute(pos,3));g.setAttribute('color',new THREE.BufferAttribute(cl,3));
+ const m=new THREE.Points(g,new THREE.PointsMaterial({size:.09,vertexColors:true}));m.position.set(pl.x,pl.y+2.4,pl.z);m.rotation.y=yaw;scene.add(m);scans.push(m);
+ if(scans.length>6){const o=scans.shift();scene.remove(o);o.geometry.dispose()}log('Room scan added: '+k+' points (relative depth, not metric).')}
+
+/* ----- Gaussian splats: render .ply/.splat/.ksplat trained offline (nerfstudio splatfacto, Brush, gsplat) ----- */
+let splatViewer=null;
+async function loadSplat(file){const g=await lib('splats');if(!g)return log('Gaussian splat library failed to load.');
+ try{if(splatViewer){scene.remove(splatViewer);await splatViewer.dispose()}}catch{}
+ splatViewer=new g.DropInViewer({gpuAcceleratedSort:false,sharedMemoryForWorkers:false});scene.add(splatViewer);
+ const ext=file.name.split('.').pop().toLowerCase(),fmt={ply:g.SceneFormat.Ply,splat:g.SceneFormat.Splat,ksplat:g.SceneFormat.KSplat}[ext];log('Loading '+file.name+'...');
+ await splatViewer.addSplatScene(URL.createObjectURL(file),{format:fmt,position:[pl.x,pl.y+.2,pl.z],rotation:[1,0,0,0],scale:[SC,SC,SC],showLoadingUI:false,splatAlphaRemovalThreshold:5});log('Splat scene loaded: '+file.name)}
+$('fsp').onchange=e=>e.target.files[0]&&loadSplat(e.target.files[0]).catch(er=>log('Splat failed: '+er.message));
+
+/* ----- Rapier physics: gravity 9.81 m/s2 at 2.2 units per meter, terrain + building colliders ----- */
+let RW=null,RP=null,tcol=null,tcx=1e9,tcz=1e9,bmesh=null,BG=null,bcol=null;const PB=[];
+async function initPhysics(){const R=await lib('rapier');if(!R)return;RP=R.default;await RP.init();RW=new RP.World({x:0,y:-21.6,z:0});
+ for(const o of ORB){const rb=RW.createRigidBody(RP.RigidBodyDesc.dynamic().setTranslation(o.position.x,o.position.y,o.position.z).setLinearDamping(.05).setCcdEnabled(true));
+  RW.createCollider(RP.ColliderDesc.ball(.45).setRestitution(.55).setFriction(.8),rb);o.userData.rb=rb;PB.push(o)}
+ for(let i=0;i<12;i++){const m=new THREE.Mesh(new THREE.BoxGeometry(.9,.9,.9),new THREE.MeshLambertMaterial({color:0xc79a5b}));scene.add(m);
+  const rb=RW.createRigidBody(RP.RigidBodyDesc.dynamic().setTranslation(pl.x+4+i%4,pl.y+3+(i>>2)*1.1,pl.z+4).setCcdEnabled(true));
+  RW.createCollider(RP.ColliderDesc.cuboid(.45,.45,.45).setRestitution(.1).setFriction(.9),rb);m.userData={rb,crate:true,v:new THREE.Vector3(),held:null};PB.push(m)}
+ bcolAdd()}
+function terrCol(){if(Math.hypot(pl.x-tcx,pl.z-tcz)<24&&tcol)return;tcx=pl.x;tcz=pl.z;const n=48,s=3,v=new Float32Array((n+1)*(n+1)*3),ix=new Uint32Array(n*n*6);
+ for(let j=0;j<=n;j++)for(let i=0;i<=n;i++){const x=tcx+(i-n/2)*s,z=tcz+(j-n/2)*s,k=(j*(n+1)+i)*3;v[k]=x;v[k+1]=H(x,z);v[k+2]=z}
+ let q=0;for(let j=0;j<n;j++)for(let i=0;i<n;i++){const a=j*(n+1)+i;ix.set([a,a+n+1,a+1,a+1,a+n+1,a+n+2],q);q+=6}
+ if(tcol)RW.removeCollider(tcol,false);tcol=RW.createCollider(RP.ColliderDesc.trimesh(v,ix))}
+function bcolAdd(){if(!RW||!BG)return;if(bcol)RW.removeCollider(bcol,false);const p=BG.attributes.position.array;
+ bcol=RW.createCollider(RP.ColliderDesc.trimesh(new Float32Array(p),Uint32Array.from({length:p.length/3},(_,i)=>i)))}
+function interact(dt){if(!RW)return interactOld(dt);terrCol();
+ for(const o of PB){const u=o.userData,rb=u.rb;
+  if(u.held!==null){const hd=HP[u.held];if(hd.pinch&&hd.on){rb.setNextKinematicTranslation(hd.pt);u.v.copy(hd.vel);continue}
+   rb.setBodyType(RP.RigidBodyType.Dynamic,true);rb.setLinvel(u.v,true);u.held=null}
+  for(let h=0;h<2;h++){const hd=HP[h];if(!hd.on)continue;const p=rb.translation();V1.set(p.x,p.y,p.z);
+   if(hd.pinch&&!hd.has&&hd.pt.distanceTo(V1)<1.6){u.held=h;hd.has=true;rb.setBodyType(RP.RigidBodyType.KinematicPositionBased,true);break}
+   if(!hd.pinch&&hd.tip.distanceTo(V1)<.9){V2.subVectors(V1,hd.tip).normalize().multiplyScalar(6);rb.applyImpulse(V2,true)}}}
+ RW.timestep=Math.min(dt,.033);RW.step();
+ for(const o of PB){const rb=o.userData.rb,p=rb.translation(),r=rb.rotation();o.position.set(p.x,p.y,p.z);o.quaternion.set(r.x,r.y,r.z,r.w);if(!o.userData.crate)o.scale.setScalar(1+rms*2);
+  if(p.y<-5000||Math.hypot(p.x-pl.x,p.z-pl.z)>90){const a=Math.random()*6.28;rb.setTranslation({x:pl.x+Math.cos(a)*10,y:H(pl.x,pl.z)+8,z:pl.z+Math.sin(a)*10},true);rb.setLinvel({x:0,y:0,z:0},true)}}}
+
+/* ----- real buildings (OpenStreetMap footprints extruded at true height), weather, earthquakes, geology map ----- */
+async function loadBuildings(lat,lon){const m=await lib('three/addons/utils/BufferGeometryUtils.js');if(!m)return;
+ const q=`[out:json][timeout:25];way["building"](around:600,${lat},${lon});out geom 500;`,gs=[];
+ const els=(await(await fetch('https://overpass-api.de/api/interpreter?data='+encodeURIComponent(q))).json()).elements;
+ for(const e of els){if(!e.geometry||e.geometry.length<4)continue;const pts=e.geometry.map(p=>toW(p.lat,p.lon)),t=e.tags||{},
+  hm=parseFloat(t.height)||(+t['building:levels']||2)*3.2,g=new THREE.ExtrudeGeometry(new THREE.Shape(pts.map(p=>new THREE.Vector2(p[0],-p[1]))),{depth:hm/REAL.mu,bevelEnabled:false});
+  g.rotateX(-Math.PI/2);g.translate(0,Math.min(...pts.map(p=>H(p[0],p[1])))-.3,0);gs.push(g)}
+ if(!gs.length||!REAL)return;if(bmesh){scene.remove(bmesh);bmesh.geometry.dispose()}
+ BG=m.mergeGeometries(gs);bmesh=new THREE.Mesh(BG,new THREE.MeshLambertMaterial({color:0xc4ccd6}));scene.add(bmesh);bcolAdd();
+ $('st').textContent+='\n'+gs.length+' real buildings extruded from OpenStreetMap footprints'}
+async function geoMap(){const{x0,y0,z}=REAL,W=1280,c=document.createElement('canvas');c.width=c.height=W;const x=c.getContext('2d');x.fillStyle='#888';x.fillRect(0,0,W,W);let ok=0;
+ await Promise.all([...Array(25).keys()].map(k=>new Promise(res=>{const im=new Image();im.crossOrigin='anonymous';im.onload=()=>{x.drawImage(im,(k%5)*256,((k/5)|0)*256,256,256);ok++;res()};im.onerror=res;
+  im.src=`https://tiles.macrostrat.org/carto/${z}/${x0+k%5}/${y0+((k/5)|0)}.png`})));
+ if(!ok)return;const t=new THREE.CanvasTexture(c);t.colorSpace=THREE.SRGBColorSpace;U.uGeo.value=t;U.uGeoOn.value=1;$('st').textContent+='\nMacrostrat geologic map draped on terrain (U toggles)'}
+function live4(street){const{lat,lon}=REAL;
+ fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,wind_speed_10m,cloud_cover,precipitation,visibility`).then(r=>r.json()).then(j=>{const c=j.current;
+  $('wx').textContent=`Now: ${c.temperature_2m} C, wind ${c.wind_speed_10m} km/h, cloud ${c.cloud_cover}%, rain ${c.precipitation} mm`;
+  P.fog=clamp(P.fog*(1+(24000-Math.min(c.visibility||24000,24000))/4000),.0012,.02);applyBiome();scene.fog.density=P.fog;sun.intensity=1-(c.cloud_cover||0)/250}).catch(()=>{});
+ fetch('https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.geojson').then(r=>r.json()).then(j=>{let n=0;
+  for(const f of j.features){const[lo,la]=f.geometry.coordinates,[x,z]=toW(la,lo);if(Math.hypot(x,z)*REAL.mu/1000>(street?200:400)||n>8)continue;n++;
+   const sp=mkLabel(`M${f.properties.mag} ${f.properties.place||''}`,'#ff8a7a');sp.position.set(x,H(x,z)+30,z);scene.add(sp);LB.push({s:sp,x,z,nm:'M'+f.properties.mag+' quake',ty:'earthquake',lat:la,lon:lo})}
+  if(n)$('st').textContent+='\n'+n+' M2.5+ earthquakes in the last day nearby (USGS)'}).catch(()=>{});
+ if(street)loadBuildings(lat,lon).catch(e=>console.warn(e));else geoMap().catch(e=>console.warn(e))}
+/* street photos: free Mapillary token, open the page as phase4.html?mly=YOUR_TOKEN */
+const MLY=new URLSearchParams(location.search).get('mly');let sx0=1e9,sz0=1e9,svb=0;
+async function streetPhoto(){if(!MLY||!REAL||!REAL.street||gal||performance.now()-svb<3000||Math.hypot(pl.x-sx0,pl.z-sz0)<12)return;svb=performance.now();sx0=pl.x;sz0=pl.z;
+ const[la,lo]=toLL(pl.x,pl.z),d=.0006,j=await(await fetch(`https://graph.mapillary.com/images?fields=id,thumb_1024_url,computed_geometry&limit=30&bbox=${lo-d},${la-d},${lo+d},${la+d}&access_token=${MLY}`)).json();
+ let b=null,bd=1e9;for(const i of j.data||[]){const[ilo,ila]=i.computed_geometry.coordinates,dd=Math.hypot(ila-la,ilo-lo);if(dd<bd){bd=dd;b=i}}
+ const im=$('sv');if(b){im.src=b.thumb_1024_url;im.style.display='block'}else im.style.display='none'}
+
+/* ----- social presence over your own relay (bridge2.py --social) ----- */
+let sock=null;const me=Math.random().toString(36).slice(2,8),peers={},wkey=()=>REAL?REAL.q+REAL.street:'p'+biome;
+function join(){if(sock)return;sock=new WebSocket(`ws://${location.hostname||'localhost'}:8766`);sock.onopen=()=>log('Social: joined as '+me);sock.onclose=()=>{sock=null;log('Social: disconnected')};
+ sock.onmessage=e=>{try{const m=JSON.parse(e.data);if(m.id===me||m.w!==wkey())return;let p=peers[m.id];
+  if(!p){const mt=new THREE.MeshBasicMaterial({color:new THREE.Color().setHSL(parseInt(m.id,36)%100/100,.8,.6)}),g=new THREE.Group(),b=new THREE.Mesh(new THREE.CylinderGeometry(.5,.35,2.4,10),mt),h=new THREE.Mesh(new THREE.SphereGeometry(.5,12,8),mt),l=mkLabel(m.id,'#fff');
+   h.position.y=1.6;l.position.y=2.4;g.add(b,h,l);scene.add(g);p=peers[m.id]={g,t:0}}p.g.position.set(m.x,m.y+1.2,m.z);p.t=performance.now()}catch{}}}
+setInterval(()=>{if(sock&&sock.readyState===1)sock.send(JSON.stringify({id:me,w:wkey(),x:pl.x,y:pl.y,z:pl.z}));for(const k in peers)if(performance.now()-peers[k].t>5000){scene.remove(peers[k].g);delete peers[k]}},100);
+
+addEventListener('keydown',e=>{if(e.target.tagName==='INPUT')return;
+ if(e.code==='KeyR')scanRoom().catch(er=>log('Depth failed: '+er.message));if(e.code==='KeyO')$('fsp').click();
+ if(e.code==='KeyK'&&REAL)loadPlace(REAL.q,!REAL.street).catch(er=>log(er.message));
+ if(e.code==='KeyU'&&U.uGeo.value!==GT0)U.uGeoOn.value=1-U.uGeoOn.value;if(e.code==='KeyJ')join()});
+(async()=>{const vr=await lib('three/addons/webxr/VRButton.js');
+ if(vr){const b=vr.VRButton.createButton(renderer);document.body.appendChild(b);b.style.left='auto';b.style.right='12px';b.style.bottom='250px'}
+ await initPhysics().catch(e=>console.warn('physics',e))})();
+
+/* ---------- input and main loop ---------- */
+const keys={};addEventListener('keydown',e=>{if(e.target.tagName==='INPUT')return;keys[e.code]=1;if(e.code==='KeyM')snd();if(e.code==='KeyI')inv=!inv;if(e.code==='KeyN')simOn=!simOn;if(e.code==='KeyV'){mode=(mode+1)%3;av.visible=mode!==1;body.visible=mode!==0}});
+addEventListener('keyup',e=>keys[e.code]=0);cv.onclick=()=>cv.requestPointerLock();
+addEventListener('mousemove',e=>{if(document.pointerLockElement===cv){if(gal){gy-=e.movementX*.002;gp=Math.max(-1.5,Math.min(1.5,gp-e.movementY*.002));return}yaw-=e.movementX*.002;pitch=Math.max(-.3,Math.min(1.2,pitch+e.movementY*.002))}});
+function size(){renderer.setSize(innerWidth,innerHeight,false);camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix()}
+addEventListener('resize',size);size();setBiome('earth');
+
+let last=0,fc=0,ft=0,fr=0;
+function loop(ts){const dt=Math.min(.05,(ts-last)/1000);last=ts;if(gal){galStep(dt,ts);return}
+ const xa=xrAxes(),sp=keys.ShiftLeft?60:18,fw=(keys.KeyW?1:0)-(keys.KeyS?1:0)-xa[1],sd=(keys.KeyD?1:0)-(keys.KeyA?1:0)+xa[0];
+ pl.x+=(-Math.sin(yaw)*fw+Math.cos(yaw)*sd)*sp*dt;pl.z+=(-Math.cos(yaw)*fw-Math.sin(yaw)*sd)*sp*dt;
+ lift=Math.max(0,lift+((keys.Space?1:0)-(keys.KeyC?1:0))*25*dt);pl.y=H(pl.x,pl.z)+lift;
+ lodUpdate();vision(ts);audio();sim(ts/1000);interact(dt);beacons();
+ const d=9,cp=new THREE.Vector3(pl.x+Math.sin(yaw)*Math.cos(pitch)*d,pl.y+2+Math.sin(pitch)*d,pl.z+Math.cos(yaw)*Math.cos(pitch)*d);
+ cp.y=Math.max(cp.y,H(cp.x,cp.z)+1.5);xrCam(cp);
+ av.position.set(pl.x,pl.y+1.6,pl.z);av.rotation.y=yaw;avatarUpdate();stars.position.copy(pl);
+ for(let i=0;i<32;i++){const a=i/32*6.283,x=pl.x+Math.cos(a)*5,z=pl.z+Math.sin(a)*5,h=.1+(fd?fd[i*6]/255*5:0);
+  bars[i].scale.y=h;bars[i].position.set(x,H(x,z)+h/2,z)}
+ const wp=wg.attributes.position;for(let i=0;i<128;i++)wp.setXYZ(i,(i/127-.5)*6,td?(td[i*8]-128)/128*1.5:0,0);wp.needsUpdate=true;
+ wave.position.set(pl.x,pl.y+4.2,pl.z);wave.rotation.y=yaw;
+ const hr=S['hr.bpm'];if(hr){pulse.visible=true;pulse.position.set(pl.x,pl.y+3.6,pl.z);pulse.scale.setScalar(1+.25*Math.sin(ts/1000*6.283*hr.v/60))}
+ U.uGlow.value=Math.min(1,rms*4);sun.intensity=1+Math.min(1,(S['cam.motion']?.v||0)/8);
+ if(o1){const f=80*Math.pow(2,pl.y/(P.amp*1.2+1)*1.5+1),t=ac.currentTime;o1.frequency.setTargetAtTime(f,t,.1);o2.frequency.setTargetAtTime(f*1.5+sp/6,t,.1)}
+ if(++fr%3===0)drawScope();
+ renderer.render(scene,camera);
+ fc++;ft+=dt;if(ft>.5){$('fps').textContent=`${Math.round(fc/ft)} fps | chunks ${chunks.size} | ${biome} | seg ${seg?'on':'off'} | pose ${pose?'on':'off'} | hands ${nh} | ${['cutout','avatar','both'][mode]} | ${gal?'galaxy '+G.info:near} | sound ${sndOn?'on':'off'}`;fc=0;ft=0}}
+renderer.setAnimationLoop(loop);
+</script></body></html>
