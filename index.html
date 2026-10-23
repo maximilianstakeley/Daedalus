@@ -1,0 +1,166 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reality Sim, Phase 1</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#04060c;color:#d4e8e0;font:12px/1.4 Consolas,"SF Mono",monospace}
+#gl{position:fixed;inset:0;width:100%;height:100%}
+.p{position:fixed;background:#08121ccc;border:1px solid #2b4d52;border-radius:4px;padding:8px}
+#hud{top:8px;left:8px;width:270px}#scope{bottom:8px;left:8px;width:300px;height:220px}
+#prompt{bottom:8px;left:50%;transform:translateX(-50%);display:flex;gap:6px;margin:0}
+button,input{background:#0e2630;color:#d4e8e0;border:1px solid #2b4d52;border-radius:3px;padding:5px 8px;font:inherit}
+button:hover{background:#1a4450}input{width:340px}pre{margin:6px 0 0;white-space:pre-wrap}
+</style>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","@mediapipe/tasks-vision":"https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs"}}</script>
+</head><body>
+<canvas id="gl"></canvas><video id="cam" playsinline muted style="display:none"></video>
+<div class="p" id="hud"><b>Reality Sim, phase 1</b><br>
+<button id="go">Start camera + mic</button>
+<button id="hr">Heart rate (BLE)</button><button id="ser">Serial</button><button id="ws">WebSocket</button>
+<pre id="st">Press Start. Click the scene to capture the mouse. WASD move, Shift boost, Space/C up/down, M sound, I invert mask.</pre><pre id="fps"></pre></div>
+<canvas class="p" id="scope" width="300" height="220"></canvas>
+<form class="p" id="prompt"><input id="txt" placeholder="Describe a world: space, forest, desert, ocean, snow, mars"><button>Generate</button></form>
+<script type="module">
+import * as THREE from 'three';
+import {FilesetResolver,ImageSegmenter} from '@mediapipe/tasks-vision';
+const $=id=>document.getElementById(id),cv=$('gl'),cam=$('cam'),log=m=>$('st').textContent=m;
+
+/* ---------- signal bus: every sensor calls sig(name,value) ---------- */
+const S={};
+const sig=(n,v)=>{const s=S[n]||(S[n]={v,h:new Array(150).fill(v)});s.v=v;s.h.push(v);s.h.shift()};
+const sx=$('scope').getContext('2d');
+function drawScope(){sx.clearRect(0,0,300,220);sx.font='10px Consolas,monospace';let y=0;
+ for(const[n,s]of Object.entries(S).slice(0,12)){const lo=Math.min(...s.h),r=(Math.max(...s.h)-lo)||1;
+  sx.strokeStyle='#5fe0c0';sx.beginPath();
+  s.h.forEach((v,i)=>{const px=110+i*1.26,py=y+16-(v-lo)/r*14;i?sx.lineTo(px,py):sx.moveTo(px,py)});sx.stroke();
+  sx.fillStyle='#9fc4bc';sx.fillText(n+' '+s.v.toFixed(2),4,y+12);y+=18}}
+
+/* ---------- procedural terrain ---------- */
+const hash=(x,y)=>{const h=Math.sin(x*127.1+y*311.7)*43758.5453;return h-Math.floor(h)};
+const vn=(x,y)=>{const xi=Math.floor(x),yi=Math.floor(y),xf=x-xi,yf=y-yi,u=xf*xf*(3-2*xf),v=yf*yf*(3-2*yf);
+ return hash(xi,yi)*(1-u)*(1-v)+hash(xi+1,yi)*u*(1-v)+hash(xi,yi+1)*(1-u)*v+hash(xi+1,yi+1)*u*v};
+const PRE={
+ earth:{amp:40,sky:0x7aa7d8,fog:.006,lo:[.18,.45,.18],hi:[.85,.85,.8],stars:0},
+ forest:{amp:28,sky:0x4a6a58,fog:.012,lo:[.04,.28,.08],hi:[.3,.5,.2],stars:0},
+ desert:{amp:34,sky:0xe8c490,fog:.005,lo:[.75,.55,.28],hi:[.95,.8,.5],stars:0},
+ ocean:{amp:10,sky:0x6ab0d8,fog:.008,lo:[.04,.18,.45],hi:[.3,.7,.8],stars:0},
+ snow:{amp:65,sky:0xaec4d8,fog:.01,lo:[.6,.68,.78],hi:[1,1,1],stars:0},
+ mars:{amp:45,sky:0xc27a55,fog:.007,lo:[.45,.18,.1],hi:[.8,.45,.3],stars:.3},
+ space:{amp:6,sky:0x010208,fog:.0006,lo:[.08,.08,.3],hi:[.6,.3,.8],stars:1}};
+const SYN={galaxy:'space',star:'space',stars:'space',satellite:'space',orbit:'space',jungle:'forest',trees:'forest',
+ sand:'desert',dune:'desert',dunes:'desert',sea:'ocean',water:'ocean',ice:'snow',mountain:'snow',mountains:'snow',red:'mars'};
+let P=PRE.earth,seed=0,biome='earth';
+const H=(x,z)=>{x+=seed;z+=seed*.7;let a=1,f=.008,s=0;for(let o=0;o<5;o++){s+=a*vn(x*f,z*f);a*=.5;f*=2.1}return(s-.95)*P.amp*2};
+
+const renderer=new THREE.WebGLRenderer({canvas:cv,antialias:false,powerPreference:'high-performance'});
+renderer.setPixelRatio(Math.min(devicePixelRatio,1.5));
+const scene=new THREE.Scene(),camera=new THREE.PerspectiveCamera(65,1,.1,1500);
+scene.add(new THREE.HemisphereLight(0xffffff,0x334455,.9));
+const sun=new THREE.DirectionalLight(0xffffff,1);sun.position.set(100,160,60);scene.add(sun);
+const tmat=new THREE.MeshStandardMaterial({vertexColors:true,roughness:1,emissive:0x2266ff,emissiveIntensity:0});
+const CS=64,SEG=24,R=3,chunks=new Map();
+function build(cx,cz){const g=new THREE.PlaneGeometry(CS,CS,SEG,SEG);g.rotateX(-Math.PI/2);
+ const p=g.attributes.position,col=new Float32Array(p.count*3);
+ for(let i=0;i<p.count;i++){const x=p.getX(i)+cx*CS,z=p.getZ(i)+cz*CS,h=H(x,z),t=Math.min(1,Math.max(0,h/(P.amp*1.2)+.5));
+  p.setXYZ(i,x,h,z);for(let k=0;k<3;k++)col[i*3+k]=P.lo[k]+(P.hi[k]-P.lo[k])*t}
+ g.setAttribute('color',new THREE.BufferAttribute(col,3));g.computeVertexNormals();
+ const m=new THREE.Mesh(g,tmat);scene.add(m);chunks.set(cx+','+cz,m)}
+function stream(n){const cx=Math.round(pl.x/CS),cz=Math.round(pl.z/CS),need=[];
+ for(let i=-R;i<=R;i++)for(let j=-R;j<=R;j++)if(!chunks.has((cx+i)+','+(cz+j)))need.push([cx+i,cz+j,i*i+j*j]);
+ need.sort((a,b)=>a[2]-b[2]);need.slice(0,n).forEach(c=>build(c[0],c[1]));
+ for(const[k,m]of chunks){const[x,z]=k.split(',');if(Math.abs(x-cx)>R+1||Math.abs(z-cz)>R+1){scene.remove(m);m.geometry.dispose();chunks.delete(k)}}}
+function clearChunks(){for(const m of chunks.values()){scene.remove(m);m.geometry.dispose()}chunks.clear()}
+
+const sv=[];for(let i=0;i<3000;i++){const a=Math.random()*6.283,b=Math.acos(2*Math.random()-1);sv.push(900*Math.sin(b)*Math.cos(a),900*Math.cos(b),900*Math.sin(b)*Math.sin(a))}
+const sg=new THREE.BufferGeometry();sg.setAttribute('position',new THREE.Float32BufferAttribute(sv,3));
+const stars=new THREE.Points(sg,new THREE.PointsMaterial({color:0xffffff,size:1.6,sizeAttenuation:false,transparent:true,opacity:0,fog:false}));scene.add(stars);
+scene.fog=new THREE.FogExp2(0x7aa7d8,.006);
+function setBiome(k){biome=k;P=PRE[k];seed=Math.random()*1e4;clearChunks();
+ scene.background=new THREE.Color(P.sky);scene.fog.color.set(P.sky);scene.fog.density=P.fog;stars.material.opacity=P.stars;log('World: '+k)}
+$('prompt').onsubmit=e=>{e.preventDefault();let k=null;
+ for(const w of $('txt').value.toLowerCase().split(/\W+/)){if(PRE[w]){k=w;break}if(SYN[w]){k=SYN[w];break}}
+ k?setBiome(k):log('No match. Phase 1 reads keywords only (LLM parsing comes later). Try: '+Object.keys(PRE).join(', '))};
+
+/* ---------- player, avatar (you), signal visuals ---------- */
+const pl=new THREE.Vector3(0,0,0);let yaw=0,pitch=.35,lift=0,inv=false;
+const AW=256,AH=192,src=document.createElement('canvas'),out=document.createElement('canvas');
+src.width=out.width=AW;src.height=out.height=AH;
+const sctx=src.getContext('2d',{willReadFrequently:true}),octx=out.getContext('2d');
+const tex=new THREE.CanvasTexture(out);tex.colorSpace=THREE.SRGBColorSpace;tex.wrapS=THREE.RepeatWrapping;tex.repeat.x=-1;
+const av=new THREE.Mesh(new THREE.PlaneGeometry(4.27,3.2),new THREE.MeshBasicMaterial({map:tex,transparent:true,side:THREE.DoubleSide,fog:false}));scene.add(av);
+const bars=[];for(let i=0;i<32;i++){const m=new THREE.Mesh(new THREE.BoxGeometry(.5,1,.5),new THREE.MeshBasicMaterial({color:new THREE.Color().setHSL(i/32,.8,.55)}));scene.add(m);bars.push(m)}
+const wg=new THREE.BufferGeometry();wg.setAttribute('position',new THREE.BufferAttribute(new Float32Array(128*3),3));
+const wave=new THREE.Line(wg,new THREE.LineBasicMaterial({color:0x5fe0c0}));scene.add(wave);
+const pulse=new THREE.Mesh(new THREE.SphereGeometry(.35,16,12),new THREE.MeshBasicMaterial({color:0xff4060}));scene.add(pulse);pulse.visible=false;
+
+/* ---------- vision: webcam -> person mask + motion energy ---------- */
+let seg=null,prev=null,lastSeg=0;
+function vision(ts){if(!cam.videoWidth||ts-lastSeg<33)return;lastSeg=ts;
+ sctx.drawImage(cam,0,0,AW,AH);const img=sctx.getImageData(0,0,AW,AH),d=img.data,n=AW*AH,cur=new Uint8Array(n);
+ for(let i=0;i<n;i++)cur[i]=(d[i*4]+d[i*4+1]*2+d[i*4+2])>>2;
+ if(prev){let mo=0;for(let i=0;i<n;i+=4)mo+=Math.abs(cur[i]-prev[i]);sig('cam.motion',mo/(n/4))}prev=cur;
+ const fin=m=>{let pc=0;for(let i=0;i<n;i++){const q=(m?m[i]>0:true)!==inv;d[i*4+3]=q?255:0;pc+=q}
+  sig('cam.person%',pc/n*100);octx.putImageData(img,0,0);tex.needsUpdate=true};
+ if(seg)seg.segmentForVideo(src,ts,r=>fin(r.categoryMask.getAsUint8Array()));else fin(null)}
+
+/* ---------- audio in (analysis) and audio out (sonification) ---------- */
+let ac,an,fd,td,rms=0,o1,o2,g,sndOn=false;
+function audio(){if(!an)return;an.getByteFrequencyData(fd);an.getByteTimeDomainData(td);
+ let s=0;for(let i=0;i<td.length;i++){const v=(td[i]-128)/128;s+=v*v}rms=Math.sqrt(s/td.length);
+ let pk=1;for(let i=1;i<fd.length;i++)if(fd[i]>fd[pk])pk=i;let b=0;for(let i=0;i<8;i++)b+=fd[i];
+ sig('mic.rms',rms);sig('mic.peakHz',pk*ac.sampleRate/an.fftSize);sig('mic.bass',b/8/255)}
+function snd(){if(!ac)return log('Press Start first.');
+ if(!o1){g=ac.createGain();g.gain.value=0;o1=ac.createOscillator();o2=ac.createOscillator();o1.connect(g);o2.connect(g);g.connect(ac.destination);o1.start();o2.start()}
+ sndOn=!sndOn;g.gain.setTargetAtTime(sndOn?.04:0,ac.currentTime,.1)}
+
+/* ---------- device inputs ---------- */
+$('go').onclick=async()=>{try{
+ const ms=await navigator.mediaDevices.getUserMedia({video:{width:640,height:480},audio:{echoCancellation:false,noiseSuppression:false}});
+ cam.srcObject=ms;await cam.play();ac=new AudioContext();an=ac.createAnalyser();an.fftSize=1024;an.smoothingTimeConstant=.7;
+ ac.createMediaStreamSource(ms).connect(an);fd=new Uint8Array(an.frequencyBinCount);td=new Uint8Array(an.fftSize);
+ if(typeof DeviceMotionEvent?.requestPermission==='function')await DeviceMotionEvent.requestPermission();
+ addEventListener('devicemotion',e=>{const a=e.accelerationIncludingGravity;if(a&&a.x!=null){sig('imu.ax',a.x);sig('imu.ay',a.y);sig('imu.az',a.z)}});
+ log('Camera and mic live. Loading segmentation model...');
+ try{const fs=await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+  seg=await ImageSegmenter.createFromOptions(fs,{baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite',delegate:'GPU'},runningMode:'VIDEO',outputCategoryMask:true,outputConfidenceMasks:false});
+  log('Live. Segmentation on. Press I if you appear as the background.')}
+ catch(e){log('Camera works, segmentation failed ('+e.message+'). Showing the full frame.')}
+}catch(e){log('Start failed: '+e.message)}};
+$('hr').onclick=async()=>{try{const d=await navigator.bluetooth.requestDevice({filters:[{services:['heart_rate']}]});
+ const c=await(await(await d.gatt.connect()).getPrimaryService('heart_rate')).getCharacteristic('heart_rate_measurement');await c.startNotifications();
+ c.addEventListener('characteristicvaluechanged',e=>{const v=e.target.value;sig('hr.bpm',v.getUint8(0)&1?v.getUint16(1,true):v.getUint8(1))});log('Heart rate connected.')}
+ catch(e){log('Heart rate: '+e.message+' (needs Chrome/Edge and a BLE strap)')}};
+$('ser').onclick=async()=>{try{const p=await navigator.serial.requestPort();await p.open({baudRate:115200});
+ const r=p.readable.pipeThrough(new TextDecoderStream()).getReader();let b='';log('Serial open. Send lines like: 1.2,0.7,3');
+ for(;;){const{value,done}=await r.read();if(done)break;b+=value;let l;
+  while((l=b.indexOf('\n'))>=0){const t=b.slice(0,l).trim();b=b.slice(l+1);t.split(/[,\s]+/).forEach((x,i)=>{const v=parseFloat(x);if(!isNaN(v))sig('serial.'+i,v)})}}}
+ catch(e){log('Serial: '+e.message+' (needs Chrome/Edge)')}};
+$('ws').onclick=()=>{const w=new WebSocket('ws://localhost:8765');w.onopen=()=>log('WebSocket connected.');w.onerror=()=>log('WebSocket: no server on ws://localhost:8765');
+ w.onmessage=e=>{try{const o=JSON.parse(e.data);for(const k in o)if(typeof o[k]==='number')sig('ws.'+k,o[k])}catch{}}};
+
+/* ---------- input and main loop ---------- */
+const keys={};addEventListener('keydown',e=>{keys[e.code]=1;if(e.code==='KeyM')snd();if(e.code==='KeyI')inv=!inv});
+addEventListener('keyup',e=>keys[e.code]=0);cv.onclick=()=>cv.requestPointerLock();
+addEventListener('mousemove',e=>{if(document.pointerLockElement===cv){yaw-=e.movementX*.002;pitch=Math.max(-.3,Math.min(1.2,pitch+e.movementY*.002))}});
+function size(){renderer.setSize(innerWidth,innerHeight,false);camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix()}
+addEventListener('resize',size);size();setBiome('earth');
+
+let last=0,fc=0,ft=0,fr=0;
+function loop(ts){requestAnimationFrame(loop);const dt=Math.min(.05,(ts-last)/1000);last=ts;
+ const sp=keys.ShiftLeft?60:18,fw=(keys.KeyW?1:0)-(keys.KeyS?1:0),sd=(keys.KeyD?1:0)-(keys.KeyA?1:0);
+ pl.x+=(-Math.sin(yaw)*fw+Math.cos(yaw)*sd)*sp*dt;pl.z+=(-Math.cos(yaw)*fw-Math.sin(yaw)*sd)*sp*dt;
+ lift=Math.max(0,lift+((keys.Space?1:0)-(keys.KeyC?1:0))*25*dt);pl.y=H(pl.x,pl.z)+lift;
+ stream(chunks.size<25?6:1);vision(ts);audio();
+ const d=9,cp=new THREE.Vector3(pl.x+Math.sin(yaw)*Math.cos(pitch)*d,pl.y+2+Math.sin(pitch)*d,pl.z+Math.cos(yaw)*Math.cos(pitch)*d);
+ cp.y=Math.max(cp.y,H(cp.x,cp.z)+1.5);camera.position.copy(cp);camera.lookAt(pl.x,pl.y+1.6,pl.z);
+ av.position.set(pl.x,pl.y+1.6,pl.z);av.rotation.y=yaw;stars.position.copy(pl);
+ for(let i=0;i<32;i++){const a=i/32*6.283,x=pl.x+Math.cos(a)*5,z=pl.z+Math.sin(a)*5,h=.1+(fd?fd[i*6]/255*5:0);
+  bars[i].scale.y=h;bars[i].position.set(x,H(x,z)+h/2,z)}
+ const wp=wg.attributes.position;for(let i=0;i<128;i++)wp.setXYZ(i,(i/127-.5)*6,td?(td[i*8]-128)/128*1.5:0,0);wp.needsUpdate=true;
+ wave.position.set(pl.x,pl.y+4.2,pl.z);wave.rotation.y=yaw;
+ const hr=S['hr.bpm'];if(hr){pulse.visible=true;pulse.position.set(pl.x,pl.y+3.6,pl.z);pulse.scale.setScalar(1+.25*Math.sin(ts/1000*6.283*hr.v/60))}
+ tmat.emissiveIntensity=Math.min(1,rms*4)*.5;sun.intensity=1+Math.min(1,(S['cam.motion']?.v||0)/8);
+ if(o1){const f=80*Math.pow(2,pl.y/(P.amp*1.2+1)*1.5+1),t=ac.currentTime;o1.frequency.setTargetAtTime(f,t,.1);o2.frequency.setTargetAtTime(f*1.5+sp/6,t,.1)}
+ if(++fr%3===0)drawScope();
+ renderer.render(scene,camera);
+ fc++;ft+=dt;if(ft>.5){$('fps').textContent=`${Math.round(fc/ft)} fps | chunks ${chunks.size} | ${biome} | seg ${seg?'on':'off'} | sound ${sndOn?'on':'off'}`;fc=0;ft=0}}
+requestAnimationFrame(loop);
+</script></body></html>
