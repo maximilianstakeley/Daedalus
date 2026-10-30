@@ -1,0 +1,4 @@
+-r requirements.txt
+open3d>=0.20,<0.21
+numpy>=1.26,<3
+Pillow>=10,<13
