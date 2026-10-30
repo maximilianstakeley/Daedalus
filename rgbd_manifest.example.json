@@ -1,0 +1,17 @@
+{
+  "coordinate_frame": "local_map",
+  "units": {"translation": "m", "depth": "m"},
+  "pose_convention": "camera_to_world",
+  "depth_scale": 1000.0,
+  "registration_quality": "replace with SLAM/registration quality and covariance metadata",
+  "camera": {"width": 640, "height": 480, "fx": 615.0, "fy": 615.0, "cx": 319.5, "cy": 239.5},
+  "frames": [
+    {
+      "timestamp": "2026-10-30T12:00:00Z",
+      "color": "frames/color_0001.png",
+      "depth": "frames/depth_0001.png",
+      "depth_scale": 1000.0,
+      "pose": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
+    }
+  ]
+}
