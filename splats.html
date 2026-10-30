@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="theme-color" content="#071018" />
+  <title>Daedalus · Gaussian Splat Viewer</title>
+</head>
+<body class="splat-page">
+  <main id="splat-root">
+    <header class="splat-toolbar">
+      <div><b>DAEDALUS / RECONSTRUCTION VIEWER</b><span>Gaussian splats · Nerfstudio Splatfacto exports</span></div>
+      <form id="splat-form">
+        <input id="splat-url" value="/assets/scene.ply" aria-label="Gaussian splat asset URL" />
+        <button type="submit">LOAD SCENE</button>
+      </form>
+      <a href="/">RETURN TO 4D GLOBE</a>
+    </header>
+    <div id="splat-viewport"></div>
+    <div id="splat-status" role="status">Enter a .ply, .splat or .ksplat asset URL. Place local exports in the API assets directory.</div>
+  </main>
+  <script type="module" src="/src/splats.js"></script>
+</body>
+</html>

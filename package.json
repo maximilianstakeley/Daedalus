@@ -1,0 +1,28 @@
+{
+  "name": "daedalus-4d-simulator",
+  "private": true,
+  "version": "0.6.0",
+  "type": "module",
+  "scripts": {
+    "predev": "node tools/copy-cesium-assets.mjs",
+    "dev": "vite --host 127.0.0.1",
+    "prebuild": "node tools/copy-cesium-assets.mjs",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "check": "node --check src/main.js && node --check src/splats.js && node --check src/reconstruction.js && node --check public/legacy-telemetry-adapter.js && node --check vite.config.js && node --check tools/copy-cesium-assets.mjs"
+  },
+  "dependencies": {
+    "@deck.gl/core": "9.4.0",
+    "@deck.gl/geo-layers": "9.4.0",
+    "@deck.gl/layers": "9.4.0",
+    "cesium": "1.146.0",
+    "@mkkellogg/gaussian-splats-3d": "0.4.7",
+    "three": "0.186.1"
+  },
+  "devDependencies": {
+    "vite": "8.3.5"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="theme-color" content="#08121b" />
+  <title>DAEDALUS // 4D Live Digital Twin</title>
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand"><div class="brand-mark">D</div><div><strong>DAEDALUS</strong><span>4D LIVE DIGITAL TWIN · RESEARCH PROTOTYPE</span></div></div>
+      <div class="connection"><i id="live-dot"></i><span id="live-status">CONNECTING</span><span class="utc" id="utc-clock">--:--:-- UTC</span></div>
+      <div class="top-actions"><button id="refresh-btn" class="quiet">↻ REFRESH SOURCES</button><button id="location-btn" class="quiet">◎ USE MY LOCATION</button></div>
+    </header>
+    <main class="layout">
+      <aside class="sidebar left">
+        <section class="panel intro"><div class="eyebrow">SYSTEM OVERVIEW</div><h1>World State</h1><p>Time-indexed observations from live public feeds, sensor streams and model outputs.</p><div class="metrics"><div><b id="obs-count">0</b><span>STORED EVENTS</span></div><div><b id="source-count">0/3</b><span>LIVE SOURCES</span></div><div><b id="ws-count">0</b><span>STREAM CLIENTS</span></div></div></section>
+        <section class="panel"><div class="section-head"><div><div class="eyebrow">LIVE ENVIRONMENT</div><h2>Atmospheric state</h2></div><span class="tag estimate">MODEL ESTIMATE</span></div><div class="weather-main"><div><b id="temperature">--°</b><small id="weather-place">Selected region</small></div><div class="weather-icon">◌</div></div><div class="weather-grid"><div><span>WIND</span><b id="wind">--</b></div><div><span>DIRECTION</span><b id="wind-dir">--</b></div><div><span>HUMIDITY</span><b id="humidity">--</b></div><div><span>PRESSURE</span><b id="pressure">--</b></div><div><span>PRECIP.</span><b id="precip">--</b></div><div><span>CLOUD</span><b id="cloud">--</b></div></div><div class="muted-line" id="weather-time">Waiting for provider update</div></section>
+        <section class="panel"><div class="section-head"><div><div class="eyebrow">GEOPHYSICAL EVENTS</div><h2>Earthquake feed</h2></div><span class="tag live">USGS</span></div><div id="quake-list" class="event-list"><div class="empty">Waiting for global event feed…</div></div></section>
+        <section class="panel"><div class="section-head"><div><div class="eyebrow">OFFICIAL WARNINGS</div><h2>Weather alerts</h2></div><span class="tag live">NWS</span></div><div id="alert-list" class="event-list"><div class="empty">No alert data received yet.</div></div></section>
+      </aside>
+      <section class="center-stage">
+        <div class="map-shell"><div class="map-heading"><div><div class="eyebrow">EARTH SYSTEM // GEOSPATIAL VIEW</div><strong id="map-location">GLOBAL VIEW</strong></div><div class="map-actions"><button id="home-view" class="map-btn">WORLD</button><button id="terrain-toggle" class="map-btn active">LIGHTING ON</button><button id="toggle-quakes" class="map-btn active">QUAKES</button><button id="toggle-alerts" class="map-btn active">ALERTS</button><button id="toggle-forecast" class="map-btn active">FORECAST</button><button id="toggle-sim" class="map-btn active">SIM</button></div></div><div id="cesium-container"></div><div class="map-legend"><span id="terrain-mode">ELLIPSOID TERRAIN</span><span><i class="legend-dot quake"></i>EARTHQUAKE</span><span><i class="legend-dot alert"></i>ALERT</span><span><i class="legend-dot weather"></i>WEATHER</span><span><i class="legend-dot sim"></i>SIMULATION</span></div><div class="map-coordinates" id="map-coordinates">WGS84 · awaiting map state</div></div>
+        <div class="analytics-shell"><div class="analytics-title"><div><div class="eyebrow">SPATIOTEMPORAL ANALYTICS</div><strong>Event distribution & particle trajectories</strong></div><div class="analytics-meta" id="analytics-count">0 observations · 0 trajectories</div></div><div id="deck-container"></div></div>
+        <div class="timeline-shell"><div class="timeline-head"><div><div class="eyebrow">4D TIME CONTROL</div><strong id="timeline-label">LIVE · NOW</strong></div><div class="timeline-buttons"><button id="step-back" class="map-btn">− 1H</button><button id="play-btn" class="map-btn active">Ⅱ PAUSE</button><button id="step-forward" class="map-btn">+ 1H</button><label class="speed-control">RATE <select id="playback-rate" aria-label="Simulation playback speed"><option value="1">1×</option><option value="5" selected>5×</option><option value="15">15×</option><option value="60">60×</option></select></label><button id="live-btn" class="map-btn">LIVE</button></div></div><input id="timeline" type="range" min="0" max="1000" value="1000" step="1" /><div class="timeline-scale"><span id="timeline-start">−24H</span><span>OBSERVATIONS · FORECASTS · SIMULATED STATES</span><span id="timeline-end">+48H</span></div></div>
+      </section>
+      <aside class="sidebar right">
+        <section class="panel"><div class="eyebrow">SIMULATION LAB</div><h2>Wind advection ensemble</h2><p class="panel-copy">A transparent, simplified passive-tracer model driven by the selected region's latest model-estimated wind. This is not a hazardous-material or weather forecasting model.</p><div class="form-grid"><label>RELEASE LATITUDE<input id="release-lat" type="number" step="0.0001" value="27.9506" /></label><label>RELEASE LONGITUDE<input id="release-lon" type="number" step="0.0001" value="-82.4572" /></label><label>PARTICLES<select id="particle-count"><option>16</option><option selected>48</option><option>96</option><option>192</option></select></label><label>DURATION<select id="duration"><option value="15">15 min</option><option value="30">30 min</option><option value="60" selected>1 hour</option><option value="120">2 hours</option><option value="240">4 hours</option></select></label></div><button id="run-sim" class="primary">▶ RUN ENSEMBLE</button><div id="simulation-status" class="muted-line">Ready · waiting for current wind conditions</div></section>
+        <section class="panel"><div class="section-head"><div><div class="eyebrow">MODEL OUTPUT</div><h2>Scenario runs</h2></div><span class="tag derived">DERIVED</span></div><div id="scenario-list" class="event-list"><div class="empty">No scenario runs in this session.</div></div></section>
+        <section class="panel"><div class="section-head"><div><div class="eyebrow">DATA PIPELINE</div><h2>Source health</h2></div><button id="source-refresh" class="small-action">CHECK</button></div><div id="source-list" class="source-list"></div></section>
+        <section class="panel"><div class="eyebrow">SPATIAL ASSETS</div><h2>Load a reconstructed scene</h2><p class="panel-copy">Enter a hosted Cesium 3D Tiles tileset URL. A local tileset can be placed in the API's <code>data/assets</code> directory and served under <code>/assets/</code>.</p><input id="tileset-url" class="wide-input" placeholder="/assets/tileset.json" /><button id="load-tileset" class="secondary">LOAD 3D TILESET</button><a class="small-action" href="/splats.html">OPEN GAUSSIAN SPLAT VIEWER ↗</a><a class="small-action" href="/reconstruction.html">OPEN 4D MESH TIMELINE ↗</a><div id="asset-status" class="muted-line">No external 3D asset loaded.</div></section>
+        <section class="panel note-panel"><div class="eyebrow">MODEL INTEGRITY</div><div class="integrity-row"><span class="integrity observed"></span><span>Observed / source-recorded</span></div><div class="integrity-row"><span class="integrity estimated"></span><span>Model estimate / forecast</span></div><div class="integrity-row"><span class="integrity simulated"></span><span>Simulation output</span></div><div class="muted-line">No inferred or simulated result is silently relabeled as a direct measurement.</div></section>
+      </aside>
+    </main>
+    <footer><span>DAEDALUS 4D · PHASE 5 PROTOTYPE 0.6</span><span id="footer-source">PUBLIC DATA FEEDS · SENSOR INGESTION API · TEMPORAL SIMULATION</span><span>UTC CLOCK · WGS84 / EPSG:4326 · © OPENSTREETMAP</span></footer>
+  </div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

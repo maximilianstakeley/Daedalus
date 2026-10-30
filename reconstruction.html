@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="theme-color" content="#071019" />
+  <title>DAEDALUS · 4D Reconstruction Timeline</title>
+</head>
+<body class="reconstruction-page">
+  <main id="reconstruction-root">
+    <header class="reconstruction-toolbar">
+      <div class="reconstruction-brand">
+        <b>DAEDALUS / TEMPORAL RECONSTRUCTION</b>
+        <span>Open3D RGB-D TSDF · metric local-frame snapshots</span>
+      </div>
+      <div class="reconstruction-controls">
+        <button id="previous-frame" type="button">← PREVIOUS</button>
+        <button id="play-frames" type="button">▶ PLAY</button>
+        <button id="next-frame" type="button">NEXT →</button>
+        <a href="/">RETURN TO EARTH VIEW ↗</a>
+      </div>
+    </header>
+    <section class="reconstruction-stage">
+      <div id="reconstruction-canvas"></div>
+      <div class="reconstruction-overlay">
+        <div class="reconstruction-status" id="reconstruction-status">Loading reconstruction manifest…</div>
+        <div class="reconstruction-meta" id="reconstruction-meta">No snapshot selected</div>
+      </div>
+    </section>
+    <footer class="reconstruction-timeline">
+      <div class="reconstruction-time-row">
+        <strong id="snapshot-time">TIME INDEX · —</strong>
+        <span id="snapshot-count">0 SNAPSHOTS</span>
+      </div>
+      <input id="snapshot-slider" type="range" min="0" max="0" value="0" step="1" disabled />
+      <div class="reconstruction-time-row muted">
+        <span id="timeline-first">FIRST FRAME · —</span>
+        <span>ONE STATIC GEOMETRY SNAPSHOT PER TIME WINDOW</span>
+        <span id="timeline-last">LAST FRAME · —</span>
+      </div>
+      <p>These are time-indexed 3D reconstructions, not a continuously deforming scene. Geometry quality depends on camera calibration, metric depth, pose accuracy, synchronization and registration. Coordinate values remain in the manifest's declared local frame unless explicitly georeferenced.</p>
+    </footer>
+  </main>
+  <script type="module" src="/src/reconstruction.js"></script>
+</body>
+</html>
